@@ -11,5 +11,5 @@ The Halley Utility.
 ## Commands
 
 ```bash
-dotnet run --project /tmp/workspace/HalleyAssist/halley-cli/src/Halley.App.Cli -- version
+dotnet run --project ./src/Halley.App.Cli -- version
 ```
