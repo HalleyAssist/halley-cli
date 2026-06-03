@@ -177,8 +177,43 @@ public sealed class HalleyCliApplicationTests
         Assert.Contains("https://cloud.halleyassist.com/api/v1/users", harness.StderrText);
         Assert.Contains("responded 200 OK", harness.StderrText);
         Assert.Contains("Request body: <empty>", harness.StderrText);
-        Assert.Contains("Response body:", harness.StderrText);
-        Assert.Contains("alice", harness.StderrText);
+        Assert.Contains("< HTTP/1.1 200 OK", harness.StderrText);
+        Assert.Contains("< Content-Type: application/json; charset=utf-8", harness.StderrText);
+        Assert.DoesNotContain("Response body:", harness.StderrText);
+        Assert.Equal(1, CountOccurrences(harness.StderrText, "alice"));
+    }
+
+    [Fact]
+    public async Task DebugLogIncludesCurlStyleRequestResponseAndHeaders()
+    {
+        using var harness = new TestHarness((_, _) =>
+        {
+            var response = JsonResponse(HttpStatusCode.Created, """{"api_key":{"id":"123"}}""");
+            response.Headers.Add("X-Trace-Id", "trace-123");
+            return response;
+        });
+
+        var exitCode = await harness.RunAsync(
+            "api-keys",
+            "create",
+            "--organisation-id", "7",
+            "--permission", "ops_read_hubs",
+            "--token", "inline-token",
+            "--output", "json",
+            "--log", "debug");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("> POST /api/v1/api_keys HTTP/1.1", harness.StderrText);
+        Assert.Contains("> Host: cloud.halleyassist.com", harness.StderrText);
+        Assert.Contains("> Authorization: [redacted]", harness.StderrText);
+        Assert.Contains("> Content-Type: application/json; charset=utf-8", harness.StderrText);
+        Assert.Contains("\"organisation_id\":7", harness.StderrText);
+        Assert.Contains("< HTTP/1.1 201 Created", harness.StderrText);
+        Assert.Contains("< X-Trace-Id: trace-123", harness.StderrText);
+        Assert.Contains("< Content-Type: application/json; charset=utf-8", harness.StderrText);
+        Assert.Contains("\"api_key\":{\"id\":\"123\"}", harness.StderrText);
+        Assert.Equal(1, CountOccurrences(harness.StderrText, "\"api_key\":{\"id\":\"123\"}"));
+        Assert.DoesNotContain("inline-token", harness.StderrText);
     }
 
     [Fact]
@@ -485,6 +520,24 @@ public sealed class HalleyCliApplicationTests
             CallCount++;
             return Task.FromResult(password);
         }
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return 0;
+        }
+
+        var count = 0;
+        var index = 0;
+        while ((index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            index += value.Length;
+        }
+
+        return count;
     }
 
     private sealed record RecordedRequest(HttpMethod Method, string Uri, AuthenticationHeaderValue? Authorization, string? Body);

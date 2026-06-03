@@ -30,6 +30,14 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
         "token"
     };
 
+    private static readonly HashSet<string> SensitiveLogHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key"
+    };
+
     private readonly HttpClient _httpClient = httpClient;
     private readonly HalleyApiClientOptions _options = options ?? new HalleyApiClientOptions();
     private readonly ILogger? _logger = logger;
@@ -149,7 +157,11 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
             request.Content = new StringContent(requestBody, Encoding.UTF8, MediaTypeNames.Application.Json);
         }
 
-        _logger?.Debug("Sending HTTP {Method} {RequestUri}.", method.Method, requestUriText);
+        if (_logger?.IsEnabled(LogEventLevel.Debug) == true)
+        {
+            _logger.Debug("HTTP request:{NewLine}{RequestDump}", Environment.NewLine, FormatRequestForDebugLog(request, requestBodyForLog));
+        }
+
         var stopwatch = Stopwatch.StartNew();
 
         try
@@ -158,19 +170,24 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
             var rawBody = response.Content is null ? null : await response.Content.ReadAsStringAsync(cancellationToken);
             stopwatch.Stop();
             var reasonPhrase = response.ReasonPhrase ?? response.StatusCode.ToString();
+            var responseBodyForLog = FormatBodyForLog(rawBody);
 
             var logLevel = response.IsSuccessStatusCode ? LogEventLevel.Information : LogEventLevel.Warning;
             _logger?.Write(
                 logLevel,
-                "HTTP {Method} {RequestUri} responded {StatusCode} {ReasonPhrase} in {ElapsedMilliseconds} ms.{NewLine}Request body: {RequestBody}{NewLine}Response body: {ResponseBody}",
+                "HTTP {Method} {RequestUri} responded {StatusCode} {ReasonPhrase} in {ElapsedMilliseconds} ms.{NewLine}Request body: {RequestBody}",
                 method.Method,
                 requestUriText,
                 (int)response.StatusCode,
                 reasonPhrase,
                 stopwatch.ElapsedMilliseconds,
                 Environment.NewLine,
-                requestBodyForLog,
-                FormatBodyForLog(rawBody));
+                requestBodyForLog);
+
+            if (_logger?.IsEnabled(logLevel) == true)
+            {
+                _logger.Write(logLevel, "HTTP response:{NewLine}{ResponseDump}", Environment.NewLine, FormatResponseForDebugLog(response, responseBodyForLog));
+            }
 
             return new ApiCallResult(response.StatusCode, ParseJson(rawBody), string.IsNullOrWhiteSpace(rawBody) ? null : rawBody);
         }
@@ -186,6 +203,113 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
                 Environment.NewLine,
                 requestBodyForLog);
             throw;
+        }
+    }
+
+    private static string FormatRequestForDebugLog(HttpRequestMessage request, string requestBodyForLog)
+    {
+        var builder = new StringBuilder();
+        var requestUri = request.RequestUri;
+        var pathAndQuery = requestUri?.PathAndQuery ?? "/";
+        var httpVersion = FormatHttpVersion(request.Version);
+
+        builder.Append("> ")
+            .Append(request.Method.Method)
+            .Append(' ')
+            .Append(pathAndQuery)
+            .Append(' ')
+            .Append(httpVersion)
+            .AppendLine();
+
+        if (requestUri is not null)
+        {
+            builder.Append("> Host: ")
+                .Append(requestUri.IsDefaultPort ? requestUri.Host : requestUri.Authority)
+                .AppendLine();
+        }
+
+        AppendHeaders(
+            builder,
+            request.Headers,
+            ">",
+            skipHeaderNames: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Host" });
+        if (request.Content is not null)
+        {
+            AppendHeaders(builder, request.Content.Headers, ">");
+        }
+
+        AppendBody(builder, ">", requestBodyForLog);
+        return builder.ToString().TrimEnd();
+    }
+
+    private static string FormatResponseForDebugLog(HttpResponseMessage response, string responseBodyForLog)
+    {
+        var builder = new StringBuilder();
+        var httpVersion = FormatHttpVersion(response.Version);
+        var reasonPhrase = response.ReasonPhrase ?? response.StatusCode.ToString();
+
+        builder.Append("< ")
+            .Append(httpVersion)
+            .Append(' ')
+            .Append((int)response.StatusCode)
+            .Append(' ')
+            .Append(reasonPhrase)
+            .AppendLine();
+
+        AppendHeaders(builder, response.Headers, "<");
+        if (response.Content is not null)
+        {
+            AppendHeaders(builder, response.Content.Headers, "<");
+        }
+
+        AppendBody(builder, "<", responseBodyForLog);
+        return builder.ToString().TrimEnd();
+    }
+
+    private static string FormatHttpVersion(Version version) => $"HTTP/{version.Major}.{version.Minor}";
+
+    private static void AppendHeaders(
+        StringBuilder builder,
+        IEnumerable<KeyValuePair<string, IEnumerable<string>>> headers,
+        string prefix,
+        ISet<string>? skipHeaderNames = null)
+    {
+        foreach (var header in headers.OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            if (skipHeaderNames?.Contains(header.Key) == true)
+            {
+                continue;
+            }
+
+            builder.Append(prefix)
+                .Append(' ')
+                .Append(header.Key)
+                .Append(": ")
+                .Append(FormatHeaderValues(header.Key, header.Value))
+                .AppendLine();
+        }
+    }
+
+    private static string FormatHeaderValues(string headerName, IEnumerable<string> values)
+    {
+        if (SensitiveLogHeaders.Contains(headerName))
+        {
+            return "[redacted]";
+        }
+
+        return string.Join(", ", values);
+    }
+
+    private static void AppendBody(StringBuilder builder, string prefix, string body)
+    {
+        builder.Append(prefix).AppendLine();
+
+        foreach (var line in body.ReplaceLineEndings("\n").Split('\n'))
+        {
+            builder.Append(prefix)
+                .Append(' ')
+                .Append(line)
+                .AppendLine();
         }
     }
 

@@ -30,6 +30,8 @@ All commands also support `--log [level]`. Logs are written to stderr so stdout 
 - the default log level is `warning`
 - use `--log` by itself for `info`
 - accepted levels are `trace`, `debug`, `info`, `warning`, `error`, `fatal`, and `none`
+- `info` includes the response dump with headers followed by the body
+- `debug` adds a curl-style request/response trace with headers and bodies on stderr, with sensitive values redacted
 
 `login user` accepts `--password`, but if it is omitted the CLI prompts for the password interactively.
 
