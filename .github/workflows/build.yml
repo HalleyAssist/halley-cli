@@ -1,0 +1,46 @@
+name: build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  dev-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            artifact_name: halley-cli-windows-amd64
+          - os: ubuntu-latest
+            rid: linux-x64
+            artifact_name: halley-cli-linux-amd64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish CLI
+        run: |
+          dotnet publish src/Halley.App.Cli/Halley.App.Cli.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            /p:PublishSingleFile=true \
+            /p:Version=0.0.0-dev.${{ github.run_number }} \
+            /p:SourceRevisionId=${{ github.sha }} \
+            -o artifacts/${{ matrix.rid }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/${{ matrix.rid }}/

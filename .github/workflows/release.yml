@@ -1,0 +1,92 @@
+name: release
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+jobs:
+  publish:
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            artifact_name: halley-cli-windows-amd64
+          - os: windows-latest
+            rid: win-arm64
+            artifact_name: halley-cli-windows-arm64
+          - os: ubuntu-latest
+            rid: linux-x64
+            artifact_name: halley-cli-linux-amd64
+          - os: ubuntu-latest
+            rid: linux-arm64
+            artifact_name: halley-cli-linux-arm64
+          - os: macos-latest
+            rid: osx-x64
+            artifact_name: halley-cli-macos-amd64
+          - os: macos-latest
+            rid: osx-arm64
+            artifact_name: halley-cli-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="0.0.0-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Publish CLI
+        shell: bash
+        run: |
+          dotnet publish src/Halley.App.Cli/Halley.App.Cli.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            /p:PublishSingleFile=true \
+            /p:Version=${VERSION} \
+            /p:SourceRevisionId=${{ github.sha }} \
+            -o artifacts/${{ matrix.rid }}
+
+      - name: Archive artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path package | Out-Null
+          Compress-Archive -Path artifacts/${{ matrix.rid }}/* -DestinationPath package/${{ matrix.artifact_name }}.zip
+
+      - name: Archive artifact (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p package
+          cd artifacts/${{ matrix.rid }}
+          zip -r ../../package/${{ matrix.artifact_name }}.zip .
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: package/${{ matrix.artifact_name }}.zip
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: package/${{ matrix.artifact_name }}.zip

@@ -1,2 +1,15 @@
 # halley-cli
-The Halley Utility
+
+The Halley Utility.
+
+## Projects
+
+- `Halley.App.Cli` - command-line entrypoint based on `System.CommandLine`
+- `Halley.App.Main` - shared main application metadata and helpers
+- `Halley.App.Api` - API project placeholder
+
+## Commands
+
+```bash
+dotnet run --project /tmp/workspace/HalleyAssist/halley-cli/src/Halley.App.Cli -- version
+```
