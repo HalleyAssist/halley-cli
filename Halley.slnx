@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Halley.App.Api/Halley.App.Api.csproj" />
+    <Project Path="src/Halley.App.Cli/Halley.App.Cli.csproj" />
+    <Project Path="src/Halley.App.Main/Halley.App.Main.csproj" />
+  </Folder>
+</Solution>
