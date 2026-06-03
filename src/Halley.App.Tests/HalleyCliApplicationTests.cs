@@ -37,6 +37,43 @@ public sealed class HalleyCliApplicationTests
     }
 
     [Fact]
+    public async Task LoginUserPromptsForPasswordWhenOptionIsMissing()
+    {
+        var passwordPrompt = new StubPasswordPrompt("prompt-secret");
+        using var harness = new TestHarness((request, body) =>
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Equal("https://cloud.halleyassist.com/login", request.RequestUri?.ToString());
+
+            var payload = JsonNode.Parse(body!)!.AsObject();
+            Assert.Equal("alice", payload["username"]?.GetValue<string>());
+            Assert.Equal("prompt-secret", payload["password"]?.GetValue<string>());
+
+            return JsonResponse(HttpStatusCode.Created, """{"token":"user-token"}""");
+        }, passwordPrompt);
+
+        var exitCode = await harness.RunAsync("login", "user", "--username", "alice");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(1, passwordPrompt.CallCount);
+        Assert.Equal("user-token", harness.StdoutText.Trim());
+    }
+
+    [Fact]
+    public async Task LoginUserReturnsCliErrorWhenPromptedPasswordIsEmpty()
+    {
+        var passwordPrompt = new StubPasswordPrompt(string.Empty);
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{"token":"unused"}"""), passwordPrompt);
+
+        var exitCode = await harness.RunAsync("login", "user", "--username", "alice");
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(1, passwordPrompt.CallCount);
+        Assert.Contains("A password is required.", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
     public async Task LoginApiKeySavesSessionAndPrintsJsonToken()
     {
         using var harness = new TestHarness((request, body) =>
@@ -110,6 +147,67 @@ public sealed class HalleyCliApplicationTests
         Assert.Equal(0, exitCode);
         var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
         Assert.Equal("alice", payload["users"]?[0]?["name"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task LogDefaultsToWarningAndWritesNothingForSuccessfulRequests()
+    {
+        using var harness = new TestHarness((_, _) =>
+            JsonResponse(HttpStatusCode.OK, """{"users":[{"id":1,"name":"alice"}]}"""));
+
+        var exitCode = await harness.RunAsync("users", "list", "--token", "inline-token", "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(string.Empty, harness.StderrText);
+    }
+
+    [Fact]
+    public async Task LogOptionWithoutLevelUsesInfoAndWritesRequestAndResponseToStderr()
+    {
+        using var harness = new TestHarness((_, _) =>
+            JsonResponse(HttpStatusCode.OK, """{"users":[{"id":1,"name":"alice"}]}"""));
+
+        var exitCode = await harness.RunAsync("users", "list", "--token", "inline-token", "--output", "json", "--log");
+
+        Assert.Equal(0, exitCode);
+
+        var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
+        Assert.Equal("alice", payload["users"]?[0]?["name"]?.GetValue<string>());
+        Assert.Contains("HTTP GET", harness.StderrText);
+        Assert.Contains("https://cloud.halleyassist.com/api/v1/users", harness.StderrText);
+        Assert.Contains("responded 200 OK", harness.StderrText);
+        Assert.Contains("Request body: <empty>", harness.StderrText);
+        Assert.Contains("Response body:", harness.StderrText);
+        Assert.Contains("alice", harness.StderrText);
+    }
+
+    [Fact]
+    public async Task LogOutputRedactsSensitiveValues()
+    {
+        using var harness = new TestHarness((_, _) =>
+            JsonResponse(HttpStatusCode.Created, """{"token":"user-token"}"""));
+
+        var exitCode = await harness.RunAsync("login", "user", "--username", "alice", "--password", "secret", "--log", "info");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("HTTP POST", harness.StderrText);
+        Assert.Contains("https://cloud.halleyassist.com/login", harness.StderrText);
+        Assert.Contains("responded 201 Created", harness.StderrText);
+        Assert.Contains("\"password\":\"[redacted]\"", harness.StderrText);
+        Assert.DoesNotContain("secret", harness.StderrText);
+        Assert.Contains("\"token\":\"[redacted]\"", harness.StderrText);
+    }
+
+    [Fact]
+    public async Task InvalidLogLevelReturnsCliError()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
+
+        var exitCode = await harness.RunAsync("users", "me", "--token", "inline-token", "--log", "loud");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Invalid --log level `loud`", harness.StderrText);
+        Assert.Empty(harness.Requests);
     }
 
     [Fact]
@@ -244,7 +342,7 @@ public sealed class HalleyCliApplicationTests
         using var harness = new TestHarness((_, _) =>
             JsonResponse(HttpStatusCode.NotFound, """{"error":"missing"}"""));
 
-        var exitCode = await harness.RunAsync("users", "get", "missing", "--token", "inline-token", "--output", "json");
+        var exitCode = await harness.RunAsync("users", "get", "missing", "--token", "inline-token", "--output", "json", "--log", "none");
 
         Assert.Equal(1, exitCode);
         var payload = JsonNode.Parse(harness.StderrText)!.AsObject();
@@ -320,7 +418,7 @@ public sealed class HalleyCliApplicationTests
         private readonly StringWriter _stdout = new();
         private readonly StringWriter _stderr = new();
 
-        public TestHarness(Func<HttpRequestMessage, string?, HttpResponseMessage> responder)
+        public TestHarness(Func<HttpRequestMessage, string?, HttpResponseMessage> responder, IPasswordPrompt? passwordPrompt = null)
         {
             _tempDirectory = Path.Combine(Path.GetTempPath(), "halley-cli-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_tempDirectory);
@@ -329,10 +427,11 @@ public sealed class HalleyCliApplicationTests
             _handler = new RecordingHandler(responder);
             _httpClient = new HttpClient(_handler);
             Application = new HalleyCliApplication(
-                options => new HalleyApiClient(_httpClient, options),
+                (options, logger) => new HalleyApiClient(_httpClient, options, logger),
                 SessionStore,
                 _stdout,
-                _stderr);
+                _stderr,
+                passwordPrompt);
         }
 
         public HalleyCliApplication Application { get; }
@@ -374,6 +473,17 @@ public sealed class HalleyCliApplicationTests
                 body));
 
             return responder(request, body);
+        }
+    }
+
+    private sealed class StubPasswordPrompt(string? password) : IPasswordPrompt
+    {
+        public int CallCount { get; private set; }
+
+        public Task<string?> ReadPasswordAsync(TextWriter output, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult(password);
         }
     }
 

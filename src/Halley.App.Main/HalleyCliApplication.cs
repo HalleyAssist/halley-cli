@@ -1,47 +1,80 @@
 using System.CommandLine;
 using Halley.App.Api;
+using Serilog;
+using Serilog.Core;
+using Serilog.Events;
 
 namespace Halley.App.Main;
 
 public sealed class HalleyCliApplication
 {
-    private readonly Func<HalleyApiClientOptions, IHalleyApiClient> _apiClientFactory;
+    private static readonly Logger SilentLogger = new LoggerConfiguration().CreateLogger();
+
+    private readonly Func<HalleyApiClientOptions, ILogger, IHalleyApiClient> _apiClientFactory;
     private readonly ISessionStore _sessionStore;
     private readonly TextWriter _stdout;
     private readonly TextWriter _stderr;
+    private readonly IPasswordPrompt _passwordPrompt;
+    private readonly IHalleyLoggerFactory _loggerFactory;
     private readonly HalleyOutputFormatter _formatter = new();
+    private readonly AsyncLocal<ILogger?> _currentLogger = new();
     private readonly Option<string> _outputOption;
     private readonly Option<string?> _tokenOption;
     private readonly Option<string> _endpointOption;
+    private readonly Option<string?> _logOption;
     private readonly RootCommand _rootCommand;
 
     public HalleyCliApplication(
-        Func<HalleyApiClientOptions, IHalleyApiClient> apiClientFactory,
+        Func<HalleyApiClientOptions, ILogger, IHalleyApiClient> apiClientFactory,
         ISessionStore sessionStore,
         TextWriter? stdout = null,
-        TextWriter? stderr = null)
+        TextWriter? stderr = null,
+        IPasswordPrompt? passwordPrompt = null,
+        IHalleyLoggerFactory? loggerFactory = null)
     {
         _apiClientFactory = apiClientFactory;
         _sessionStore = sessionStore;
         _stdout = stdout ?? Console.Out;
         _stderr = stderr ?? Console.Error;
+        _passwordPrompt = passwordPrompt ?? new ConsolePasswordPrompt();
+        _loggerFactory = loggerFactory ?? new SerilogLoggerFactory();
         _outputOption = CreateOutputOption();
         _tokenOption = CreateOption<string?>("--token", "JWT token to use instead of the saved session token.");
         _tokenOption.Recursive = true;
         _endpointOption = CreateEndpointOption();
+        _logOption = CreateLogOption();
         _rootCommand = BuildRootCommand();
     }
 
-    public Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
+    public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
     {
         var parseResult = _rootCommand.Parse(args);
+        var outputMode = GetOutputMode(parseResult);
+        if (!TryResolveLogConfiguration(args, parseResult, out var logConfiguration, out var logError))
+        {
+            return await WriteCliErrorAsync(logError!, outputMode, cancellationToken);
+        }
+
+        using var logger = _loggerFactory.Create(logConfiguration, _stderr, IsInteractiveConsole());
+        _currentLogger.Value = logger;
+
         var invocationConfiguration = new InvocationConfiguration
         {
             Output = _stdout,
             Error = _stderr
         };
 
-        return parseResult.InvokeAsync(invocationConfiguration, cancellationToken);
+        try
+        {
+            CurrentLogger.Debug("CLI invocation started. Arguments: {@Arguments}", SanitizeArguments(args));
+            var exitCode = await parseResult.InvokeAsync(invocationConfiguration, cancellationToken);
+            CurrentLogger.Debug("CLI invocation completed with exit code {ExitCode}.", exitCode);
+            return exitCode;
+        }
+        finally
+        {
+            _currentLogger.Value = null;
+        }
     }
 
     private static Option<string> CreateOutputOption()
@@ -61,12 +94,21 @@ public sealed class HalleyCliApplication
         return option;
     }
 
+    private static Option<string?> CreateLogOption()
+    {
+        var option = CreateOption<string?>("--log", "Global log level. Defaults to `warning`; use `--log` alone for `info`, or set `trace`, `debug`, `info`, `warning`, `error`, `fatal`, or `none`.");
+        option.Recursive = true;
+        option.Arity = ArgumentArity.ZeroOrOne;
+        return option;
+    }
+
     private RootCommand BuildRootCommand()
     {
         var rootCommand = new RootCommand("The Halley Utility");
         rootCommand.Add(_outputOption);
         rootCommand.Add(_tokenOption);
         rootCommand.Add(_endpointOption);
+        rootCommand.Add(_logOption);
         rootCommand.Add(CreateVersionCommand());
         rootCommand.Add(CreateLoginCommand());
         rootCommand.Add(CreateApiKeysCommand());
@@ -97,7 +139,7 @@ public sealed class HalleyCliApplication
     private Command CreateUserLoginCommand()
     {
         var usernameOption = CreateRequiredOption<string>("--username", "The user name to authenticate.");
-        var passwordOption = CreateRequiredOption<string>("--password", "The password to authenticate.");
+        var passwordOption = CreateOption<string?>("--password", "The password to authenticate. If omitted, the CLI prompts for it.");
 
         var command = new Command("user", "Authenticate with a user name and password.");
         command.Add(usernameOption);
@@ -111,9 +153,21 @@ public sealed class HalleyCliApplication
                 return await WriteCliErrorAsync(apiClient.ErrorMessage!, outputMode, cancellationToken);
             }
 
+            var password = parseResult.GetValue(passwordOption);
+            if (string.IsNullOrWhiteSpace(password))
+            {
+                CurrentLogger.Debug("Prompting for a password for user {UserName}.", parseResult.GetRequiredValue(usernameOption));
+                password = await _passwordPrompt.ReadPasswordAsync(_stderr, cancellationToken);
+            }
+
+            if (string.IsNullOrWhiteSpace(password))
+            {
+                return await WriteCliErrorAsync("A password is required.", outputMode, cancellationToken);
+            }
+
             var request = new UserLoginRequest(
                 parseResult.GetRequiredValue(usernameOption),
-                parseResult.GetRequiredValue(passwordOption));
+                password);
 
             var result = await apiClient.Value!.LoginUserAsync(request, cancellationToken);
             return await HandleLoginResultAsync(result, "user", outputMode, cancellationToken);
@@ -936,9 +990,11 @@ public sealed class HalleyCliApplication
         try
         {
             await _sessionStore.SaveAsync(new SessionRecord(token, authType, DateTimeOffset.UtcNow), cancellationToken);
+            CurrentLogger.Information("Saved {AuthType} session token to {SessionPath}.", authType, _sessionStore.SessionPath);
         }
         catch (Exception ex)
         {
+            CurrentLogger.Error(ex, "Failed to save session to {SessionPath}.", _sessionStore.SessionPath);
             return await WriteCliErrorAsync($"Failed to save session to {_sessionStore.SessionPath}: {ex.Message}", outputMode, cancellationToken);
         }
 
@@ -965,6 +1021,7 @@ public sealed class HalleyCliApplication
         var explicitToken = parseResult.GetValue(_tokenOption);
         if (!string.IsNullOrWhiteSpace(explicitToken))
         {
+            CurrentLogger.Debug("Using the token supplied via --token.");
             return explicitToken;
         }
 
@@ -973,14 +1030,17 @@ public sealed class HalleyCliApplication
             var session = await _sessionStore.LoadAsync(cancellationToken);
             if (!string.IsNullOrWhiteSpace(session?.Token))
             {
+                CurrentLogger.Information("Loaded a saved session token from {SessionPath}.", _sessionStore.SessionPath);
                 return session.Token;
             }
 
+            CurrentLogger.Warning("No saved session token was found at {SessionPath}.", _sessionStore.SessionPath);
             await WriteCliErrorAsync("No saved session token was found. Run `login ...` first or pass `--token`.", outputMode, cancellationToken);
             return null;
         }
         catch (Exception ex)
         {
+            CurrentLogger.Error(ex, "Failed to read session from {SessionPath}.", _sessionStore.SessionPath);
             await WriteCliErrorAsync($"Failed to read session from {_sessionStore.SessionPath}: {ex.Message}", outputMode, cancellationToken);
             return null;
         }
@@ -992,10 +1052,12 @@ public sealed class HalleyCliApplication
         {
             var endpoint = parseResult.GetValue(_endpointOption);
             var options = HalleyEndpointResolver.Resolve(endpoint);
-            return ApiClientResolution.Success(_apiClientFactory(options));
+            CurrentLogger.Debug("Resolved endpoint {EndpointInput} to auth {AuthBaseUri} and api {ApiBaseUri}.", endpoint, options.AuthBaseUri, options.ApiBaseUri);
+            return ApiClientResolution.Success(_apiClientFactory(options, CurrentLogger));
         }
         catch (ArgumentException ex)
         {
+            CurrentLogger.Warning("Endpoint resolution failed: {Message}", ex.Message);
             return ApiClientResolution.Error(ex.Message);
         }
     }
@@ -1030,6 +1092,112 @@ public sealed class HalleyCliApplication
         string.Equals(parseResult.GetValue(_outputOption), "json", StringComparison.OrdinalIgnoreCase)
             ? OutputMode.Json
             : OutputMode.Human;
+
+    private ILogger CurrentLogger => _currentLogger.Value ?? SilentLogger;
+
+    private bool TryResolveLogConfiguration(
+        string[] args,
+        ParseResult parseResult,
+        out HalleyLogConfiguration configuration,
+        out string? error)
+    {
+        error = null;
+
+        var providedValue = parseResult.GetValue(_logOption);
+        var wasProvided = WasOptionProvided(args, "--log");
+        if (!wasProvided)
+        {
+            configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Warning);
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(providedValue))
+        {
+            configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Information);
+            return true;
+        }
+
+        switch (providedValue.Trim().ToLowerInvariant())
+        {
+            case "trace":
+            case "verbose":
+                configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Verbose);
+                return true;
+
+            case "debug":
+                configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Debug);
+                return true;
+
+            case "info":
+            case "information":
+                configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Information);
+                return true;
+
+            case "warn":
+            case "warning":
+                configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Warning);
+                return true;
+
+            case "error":
+                configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Error);
+                return true;
+
+            case "fatal":
+                configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Fatal);
+                return true;
+
+            case "none":
+                configuration = HalleyLogConfiguration.Disabled();
+                return true;
+
+            default:
+                configuration = HalleyLogConfiguration.Enabled(LogEventLevel.Warning);
+                error = $"Invalid --log level `{providedValue}`. Expected one of: trace, debug, info, warning, error, fatal, none.";
+                return false;
+        }
+    }
+
+    private bool IsInteractiveConsole() =>
+        ReferenceEquals(_stderr, Console.Error) && !Console.IsErrorRedirected;
+
+    private static bool WasOptionProvided(string[] args, string optionName) =>
+        args.Any(argument => string.Equals(argument, optionName, StringComparison.Ordinal) || argument.StartsWith($"{optionName}=", StringComparison.Ordinal));
+
+    private static string[] SanitizeArguments(string[] args)
+    {
+        var sensitiveOptions = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "--password",
+            "--secret",
+            "--token"
+        };
+
+        var sanitized = new string[args.Length];
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (index > 0 && sensitiveOptions.Contains(args[index - 1]))
+            {
+                sanitized[index] = "[redacted]";
+                continue;
+            }
+
+            var separatorIndex = argument.IndexOf('=');
+            if (separatorIndex > 0)
+            {
+                var optionNameOnly = argument[..separatorIndex];
+                if (sensitiveOptions.Contains(optionNameOnly))
+                {
+                    sanitized[index] = $"{optionNameOnly}=[redacted]";
+                    continue;
+                }
+            }
+
+            sanitized[index] = argument;
+        }
+
+        return sanitized;
+    }
 
     private static bool TryParseDateTimeOffset(string? value, out DateTimeOffset? parsed)
     {

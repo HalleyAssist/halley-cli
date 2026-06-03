@@ -1,12 +1,15 @@
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Mime;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Serilog;
+using Serilog.Events;
 
 namespace Halley.App.Api;
 
-public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOptions? options = null) : IHalleyApiClient
+public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOptions? options = null, ILogger? logger = null) : IHalleyApiClient
 {
     private static readonly JsonSerializerOptions ApiSerializerOptions = new()
     {
@@ -14,8 +17,22 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
+    private static readonly JsonSerializerOptions LogSerializerOptions = new()
+    {
+        WriteIndented = false
+    };
+
+    private static readonly HashSet<string> SensitiveLogFields = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "authorization",
+        "password",
+        "secret",
+        "token"
+    };
+
     private readonly HttpClient _httpClient = httpClient;
     private readonly HalleyApiClientOptions _options = options ?? new HalleyApiClientOptions();
+    private readonly ILogger? _logger = logger;
 
     public Task<ApiCallResult> LoginUserAsync(UserLoginRequest request, CancellationToken cancellationToken = default) =>
         SendAsync(HttpMethod.Post, _options.AuthBaseUri, "/login", null, request, null, cancellationToken);
@@ -116,23 +133,60 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
         IReadOnlyDictionary<string, string?>? query,
         CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(method, BuildUri(baseUri, path, query));
+        var requestUri = BuildUri(baseUri, path, query);
+        var requestBody = body is null ? null : JsonSerializer.Serialize(body, ApiSerializerOptions);
+        var requestBodyForLog = FormatBodyForLog(requestBody);
+        using var request = new HttpRequestMessage(method, requestUri);
+        var requestUriText = requestUri.ToString();
 
         if (!string.IsNullOrWhiteSpace(token))
         {
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         }
 
-        if (body is not null)
+        if (requestBody is not null)
         {
-            var json = JsonSerializer.Serialize(body, ApiSerializerOptions);
-            request.Content = new StringContent(json, Encoding.UTF8, MediaTypeNames.Application.Json);
+            request.Content = new StringContent(requestBody, Encoding.UTF8, MediaTypeNames.Application.Json);
         }
 
-        using var response = await _httpClient.SendAsync(request, cancellationToken);
-        var rawBody = response.Content is null ? null : await response.Content.ReadAsStringAsync(cancellationToken);
+        _logger?.Debug("Sending HTTP {Method} {RequestUri}.", method.Method, requestUriText);
+        var stopwatch = Stopwatch.StartNew();
 
-        return new ApiCallResult(response.StatusCode, ParseJson(rawBody), string.IsNullOrWhiteSpace(rawBody) ? null : rawBody);
+        try
+        {
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            var rawBody = response.Content is null ? null : await response.Content.ReadAsStringAsync(cancellationToken);
+            stopwatch.Stop();
+            var reasonPhrase = response.ReasonPhrase ?? response.StatusCode.ToString();
+
+            var logLevel = response.IsSuccessStatusCode ? LogEventLevel.Information : LogEventLevel.Warning;
+            _logger?.Write(
+                logLevel,
+                "HTTP {Method} {RequestUri} responded {StatusCode} {ReasonPhrase} in {ElapsedMilliseconds} ms.{NewLine}Request body: {RequestBody}{NewLine}Response body: {ResponseBody}",
+                method.Method,
+                requestUriText,
+                (int)response.StatusCode,
+                reasonPhrase,
+                stopwatch.ElapsedMilliseconds,
+                Environment.NewLine,
+                requestBodyForLog,
+                FormatBodyForLog(rawBody));
+
+            return new ApiCallResult(response.StatusCode, ParseJson(rawBody), string.IsNullOrWhiteSpace(rawBody) ? null : rawBody);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            stopwatch.Stop();
+            _logger?.Error(
+                ex,
+                "HTTP {Method} {RequestUri} failed after {ElapsedMilliseconds} ms.{NewLine}Request body: {RequestBody}",
+                method.Method,
+                requestUriText,
+                stopwatch.ElapsedMilliseconds,
+                Environment.NewLine,
+                requestBodyForLog);
+            throw;
+        }
     }
 
     private static JsonNode? ParseJson(string? rawBody)
@@ -149,6 +203,53 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
         catch (JsonException)
         {
             return null;
+        }
+    }
+
+    private static string FormatBodyForLog(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return "<empty>";
+        }
+
+        try
+        {
+            var node = JsonNode.Parse(body);
+            RedactSensitiveFields(node);
+            return node?.ToJsonString(LogSerializerOptions) ?? "<empty>";
+        }
+        catch (JsonException)
+        {
+            return body;
+        }
+    }
+
+    private static void RedactSensitiveFields(JsonNode? node)
+    {
+        switch (node)
+        {
+            case JsonObject jsonObject:
+                foreach (var property in jsonObject.ToList())
+                {
+                    if (SensitiveLogFields.Contains(property.Key))
+                    {
+                        jsonObject[property.Key] = "[redacted]";
+                        continue;
+                    }
+
+                    RedactSensitiveFields(property.Value);
+                }
+
+                break;
+
+            case JsonArray jsonArray:
+                foreach (var item in jsonArray)
+                {
+                    RedactSensitiveFields(item);
+                }
+
+                break;
         }
     }
 

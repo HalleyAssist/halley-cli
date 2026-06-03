@@ -25,16 +25,24 @@ All commands support `--output human|json`.
 
 All commands also support `--endpoint`, which defaults to `https://cloud.halleyassist.com` and accepts inputs such as `halleyassist.com`, `cloud.halleyassist.com`, or a full URL like `https://cloud.halleyassist.com`.
 
+All commands also support `--log [level]`. Logs are written to stderr so stdout stays safe for scripts.
+
+- the default log level is `warning`
+- use `--log` by itself for `info`
+- accepted levels are `trace`, `debug`, `info`, `warning`, `error`, `fatal`, and `none`
+
+`login user` accepts `--password`, but if it is omitted the CLI prompts for the password interactively.
+
 ## Examples
 
 ```bash
 dotnet run --project ./src/Halley.App.Cli -- version
 
-dotnet run --project ./src/Halley.App.Cli -- login user \
-  --username alice \
-  --password secret
+dotnet run --project ./src/Halley.App.Cli -- login user --username alice
 
 dotnet run --project ./src/Halley.App.Cli -- users me --output json
+
+dotnet run --project ./src/Halley.App.Cli -- users me --output json --log
 
 dotnet run --project ./src/Halley.App.Cli -- organisations list
 

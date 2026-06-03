@@ -32,18 +32,35 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Run tests
-        run: dotnet test Halley.slnx -c Release
+        shell: bash
+        run: bash ./scripts/run-with-core-dump-check.sh dotnet test Halley.slnx -c Release
 
       - name: Publish CLI
+        shell: bash
         run: |
-          dotnet publish src/Halley.App.Cli/Halley.App.Cli.csproj \
-            -c Release \
-            -r ${{ matrix.rid }} \
-            --self-contained true \
-            /p:PublishSingleFile=true \
-            /p:Version=0.0.0-dev.${{ github.run_number }} \
-            /p:SourceRevisionId=${{ github.sha }} \
-            -o artifacts/${{ matrix.rid }}
+          bash ./scripts/run-with-core-dump-check.sh \
+            dotnet publish src/Halley.App.Cli/Halley.App.Cli.csproj \
+              -c Release \
+              -r ${{ matrix.rid }} \
+              --self-contained true \
+              /p:PublishSingleFile=true \
+              /p:Version=0.0.0-dev.${{ github.run_number }} \
+              /p:SourceRevisionId=${{ github.sha }} \
+              -o artifacts/${{ matrix.rid }}
+
+      - name: Upload core dumps
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-dumps-${{ matrix.artifact_name }}
+          if-no-files-found: ignore
+          path: |
+            core
+            core.*
+            **/core
+            **/core.*
+            /cores/core
+            /cores/core.*
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

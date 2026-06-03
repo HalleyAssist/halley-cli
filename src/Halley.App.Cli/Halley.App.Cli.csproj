@@ -1,17 +1,11 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\Halley.App.Api\Halley.App.Api.csproj" />
-    <ProjectReference Include="..\Halley.App.Main\Halley.App.Main.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="System.CommandLine" Version="2.0.8" />
+    <ProjectReference Include="..\Halley.App.Main\Halley.App.Main.csproj" SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <DisableTransitiveProjectReferences>true</DisableTransitiveProjectReferences>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
