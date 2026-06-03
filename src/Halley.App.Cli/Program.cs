@@ -1,14 +1,11 @@
+using Halley.App.Api;
 using Halley.App.Main;
-using System.CommandLine;
 
-var rootCommand = new RootCommand("The Halley Utility");
-var versionCommand = new Command("version", "Print version and git SHA");
-
-versionCommand.SetAction(_ =>
-{
-    Console.WriteLine($"Version: {BuildInfo.Version}");
-    Console.WriteLine($"Git SHA: {BuildInfo.GitSha}");
-});
-
-rootCommand.Add(versionCommand);
-return await rootCommand.Parse(args).InvokeAsync();
+using var httpClient = new HttpClient();
+var sessionStore = new FileSessionStore();
+var application = new HalleyCliApplication(
+    options => new HalleyApiClient(httpClient, options),
+    sessionStore,
+    Console.Out,
+    Console.Error);
+return await application.RunAsync(args);

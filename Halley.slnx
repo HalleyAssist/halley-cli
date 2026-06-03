@@ -3,5 +3,6 @@
     <Project Path="src/Halley.App.Api/Halley.App.Api.csproj" />
     <Project Path="src/Halley.App.Cli/Halley.App.Cli.csproj" />
     <Project Path="src/Halley.App.Main/Halley.App.Main.csproj" />
+    <Project Path="src/Halley.App.Tests/Halley.App.Tests.csproj" />
   </Folder>
 </Solution>
