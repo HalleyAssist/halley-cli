@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Halley.App.Api;
 
@@ -8,13 +9,14 @@ public interface ISessionStore
 {
     string SessionPath { get; }
 
-    Task<SessionRecord?> LoadAsync(CancellationToken cancellationToken = default);
+    Task<SessionRecord?> LoadAsync(string endpointKey, CancellationToken cancellationToken = default);
 
-    Task SaveAsync(SessionRecord session, CancellationToken cancellationToken = default);
+    Task SaveAsync(string endpointKey, SessionRecord session, CancellationToken cancellationToken = default);
 }
 
 public sealed class FileSessionStore(string? sessionPath = null) : ISessionStore
 {
+    private static readonly string DefaultSessionKey = new HalleyApiClientOptions().SessionKey;
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true
@@ -22,18 +24,13 @@ public sealed class FileSessionStore(string? sessionPath = null) : ISessionStore
 
     public string SessionPath { get; } = sessionPath ?? ResolveDefaultSessionPath();
 
-    public async Task<SessionRecord?> LoadAsync(CancellationToken cancellationToken = default)
+    public async Task<SessionRecord?> LoadAsync(string endpointKey, CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(SessionPath))
-        {
-            return null;
-        }
-
-        await using var stream = File.OpenRead(SessionPath);
-        return await JsonSerializer.DeserializeAsync<SessionRecord>(stream, SerializerOptions, cancellationToken);
+        var document = await LoadDocumentAsync(cancellationToken);
+        return document.Sessions.TryGetValue(endpointKey, out var session) ? session : null;
     }
 
-    public async Task SaveAsync(SessionRecord session, CancellationToken cancellationToken = default)
+    public async Task SaveAsync(string endpointKey, SessionRecord session, CancellationToken cancellationToken = default)
     {
         var directory = Path.GetDirectoryName(SessionPath);
         if (!string.IsNullOrWhiteSpace(directory))
@@ -41,8 +38,55 @@ public sealed class FileSessionStore(string? sessionPath = null) : ISessionStore
             Directory.CreateDirectory(directory);
         }
 
-        var json = JsonSerializer.Serialize(session, SerializerOptions);
+        var document = await LoadDocumentAsync(cancellationToken);
+        document.Sessions[endpointKey] = session;
+
+        var json = JsonSerializer.Serialize(document, SerializerOptions);
         await File.WriteAllTextAsync(SessionPath, json, cancellationToken);
+    }
+
+    private async Task<SessionStoreDocument> LoadDocumentAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(SessionPath))
+        {
+            return new SessionStoreDocument();
+        }
+
+        var json = await File.ReadAllTextAsync(SessionPath, cancellationToken);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return new SessionStoreDocument();
+        }
+
+        JsonNode? rootNode;
+        try
+        {
+            rootNode = JsonNode.Parse(json);
+        }
+        catch (JsonException)
+        {
+            rootNode = null;
+        }
+
+        if (rootNode is JsonObject rootObject && rootObject["sessions"] is not null)
+        {
+            var document = rootNode.Deserialize<SessionStoreDocument>(SerializerOptions);
+            if (document is not null)
+            {
+                return document.WithOrdinalSessions();
+            }
+        }
+
+        var legacySession = JsonSerializer.Deserialize<SessionRecord>(json, SerializerOptions);
+        return legacySession is null
+            ? new SessionStoreDocument()
+            : new SessionStoreDocument
+            {
+                Sessions = new Dictionary<string, SessionRecord>(StringComparer.Ordinal)
+                {
+                    [DefaultSessionKey] = legacySession
+                }
+            };
     }
 
     private static string ResolveDefaultSessionPath()
@@ -59,5 +103,16 @@ public sealed class FileSessionStore(string? sessionPath = null) : ISessionStore
         }
 
         return Path.Combine(homeDirectory, ".halley", "session.json");
+    }
+
+    private sealed class SessionStoreDocument
+    {
+        public Dictionary<string, SessionRecord> Sessions { get; init; } = new(StringComparer.Ordinal);
+
+        public SessionStoreDocument WithOrdinalSessions() =>
+            new()
+            {
+                Sessions = new Dictionary<string, SessionRecord>(Sessions, StringComparer.Ordinal)
+            };
     }
 }

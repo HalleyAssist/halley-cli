@@ -13,7 +13,9 @@ The Halley Utility.
 
 Successful `login user` and `login api-key` commands save the returned JWT to `~/.halley/session.json`.
 
-All authenticated commands reuse that token automatically unless `--token <jwt>` is supplied explicitly.
+Sessions are stored per normalized endpoint, so each Halley environment keeps its own token entry.
+
+All authenticated commands reuse the token for the current `--endpoint` automatically unless `--token <jwt>` is supplied explicitly.
 
 ## Output Modes
 

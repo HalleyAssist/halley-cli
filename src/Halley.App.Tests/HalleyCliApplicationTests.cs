@@ -30,7 +30,7 @@ public sealed class HalleyCliApplicationTests
         Assert.Equal("user-token", harness.StdoutText.Trim());
         Assert.Equal(string.Empty, harness.StderrText);
 
-        var session = await harness.SessionStore.LoadAsync();
+        var session = await harness.SessionStore.LoadAsync(DefaultSessionKey);
         Assert.NotNull(session);
         Assert.Equal("user-token", session!.Token);
         Assert.Equal("user", session.AuthType);
@@ -94,7 +94,7 @@ public sealed class HalleyCliApplicationTests
         var output = JsonNode.Parse(harness.StdoutText)!.AsObject();
         Assert.Equal("api-token", output["token"]?.GetValue<string>());
 
-        var session = await harness.SessionStore.LoadAsync();
+        var session = await harness.SessionStore.LoadAsync(DefaultSessionKey);
         Assert.NotNull(session);
         Assert.Equal("api-token", session!.Token);
         Assert.Equal("api-key", session.AuthType);
@@ -109,7 +109,7 @@ public sealed class HalleyCliApplicationTests
             return JsonResponse(HttpStatusCode.OK, """{"user":{"id":1,"name":"alice","email":"alice@example.test","role":"user","avatar_url":"https://example.test/avatar.png"}}""");
         });
 
-        await harness.SessionStore.SaveAsync(new SessionRecord("stored-token", "user", DateTimeOffset.UtcNow));
+        await harness.SessionStore.SaveAsync(DefaultSessionKey, new SessionRecord("stored-token", "user", DateTimeOffset.UtcNow));
 
         var exitCode = await harness.RunAsync("users", "me");
 
@@ -117,6 +117,24 @@ public sealed class HalleyCliApplicationTests
         Assert.Contains("Field", harness.StdoutText);
         Assert.Contains("alice", harness.StdoutText);
         Assert.DoesNotContain("{", harness.StdoutText);
+    }
+
+    [Fact]
+    public async Task SessionsAreLoadedPerEndpoint()
+    {
+        using var harness = new TestHarness((request, _) =>
+        {
+            Assert.Equal("Bearer custom-token", request.Headers.Authorization?.ToString());
+            Assert.Equal("https://cloud.blah.halleyassist.com/api/v1/users/_me", request.RequestUri?.ToString());
+            return JsonResponse(HttpStatusCode.OK, """{"user":{"name":"alice"}}""");
+        });
+
+        await harness.SessionStore.SaveAsync(DefaultSessionKey, new SessionRecord("default-token", "user", DateTimeOffset.UtcNow));
+        await harness.SessionStore.SaveAsync("https://cloud.blah.halleyassist.com", new SessionRecord("custom-token", "user", DateTimeOffset.UtcNow));
+
+        var exitCode = await harness.RunAsync("users", "me", "--endpoint", "https://cloud.blah.halleyassist.com");
+
+        Assert.Equal(0, exitCode);
     }
 
     [Fact]
@@ -334,7 +352,7 @@ public sealed class HalleyCliApplicationTests
     }
 
     [Fact]
-    public async Task UsersPatchDefaultsNameToTargetWhenNewNameIsOmitted()
+    public async Task UsersUpdateDefaultsNameToTargetWhenNewNameIsOmitted()
     {
         using var harness = new TestHarness((request, body) =>
         {
@@ -347,7 +365,7 @@ public sealed class HalleyCliApplicationTests
 
         var exitCode = await harness.RunAsync(
             "users",
-            "patch",
+            "update",
             "alice",
             "--password", "pw123",
             "--token", "inline-token");
@@ -356,19 +374,31 @@ public sealed class HalleyCliApplicationTests
     }
 
     [Fact]
-    public async Task UsersDeletePrintsNullInJsonModeForNoContent()
+    public async Task UsersHelpShowsUpdateAndOmitsPutAndDelete()
     {
-        using var harness = new TestHarness((request, _) =>
-        {
-            Assert.Equal(HttpMethod.Delete, request.Method);
-            Assert.Equal("https://cloud.halleyassist.com/api/v1/users/alice", request.RequestUri?.ToString());
-            return new HttpResponseMessage(HttpStatusCode.NoContent);
-        });
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
 
-        var exitCode = await harness.RunAsync("users", "delete", "alice", "--token", "inline-token", "--output", "json");
+        var exitCode = await harness.RunAsync("users", "--help");
 
         Assert.Equal(0, exitCode);
-        Assert.Equal("null", harness.StdoutText.Trim());
+        Assert.Contains("Update an existing user.", harness.StdoutText);
+        Assert.DoesNotContain("Patch an existing user.", harness.StdoutText);
+        Assert.DoesNotContain("Replace an existing user.", harness.StdoutText);
+        Assert.DoesNotContain("Delete a user.", harness.StdoutText);
+    }
+
+    [Fact]
+    public async Task OrganisationsHelpShowsUpdateAndOmitsPutAndDelete()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
+
+        var exitCode = await harness.RunAsync("organisations", "--help");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Update an existing organisation.", harness.StdoutText);
+        Assert.DoesNotContain("Patch an existing organisation.", harness.StdoutText);
+        Assert.DoesNotContain("Replace an existing organisation.", harness.StdoutText);
+        Assert.DoesNotContain("Delete an organisation.", harness.StdoutText);
     }
 
     [Fact]
@@ -521,6 +551,8 @@ public sealed class HalleyCliApplicationTests
             return Task.FromResult(password);
         }
     }
+
+    private static string DefaultSessionKey => HalleyEndpointResolver.Resolve(HalleyApiClientOptions.DefaultEndpoint).SessionKey;
 
     private static int CountOccurrences(string text, string value)
     {

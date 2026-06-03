@@ -170,7 +170,7 @@ public sealed class HalleyCliApplication
                 password);
 
             var result = await apiClient.Value!.LoginUserAsync(request, cancellationToken);
-            return await HandleLoginResultAsync(result, "user", outputMode, cancellationToken);
+            return await HandleLoginResultAsync(result, "user", parseResult, outputMode, cancellationToken);
         });
 
         return command;
@@ -193,7 +193,7 @@ public sealed class HalleyCliApplication
 
             var request = new ApiKeyLoginRequest(parseResult.GetRequiredValue(secretOption));
             var result = await apiClient.Value!.LoginApiKeyAsync(request, cancellationToken);
-            return await HandleLoginResultAsync(result, "api-key", outputMode, cancellationToken);
+            return await HandleLoginResultAsync(result, "api-key", parseResult, outputMode, cancellationToken);
         });
 
         return command;
@@ -356,9 +356,7 @@ public sealed class HalleyCliApplication
         command.Add(CreateOrganisationsListCommand());
         command.Add(CreateOrganisationsGetCommand());
         command.Add(CreateOrganisationsCreateCommand());
-        command.Add(CreateOrganisationsPatchCommand());
-        command.Add(CreateOrganisationsPutCommand());
-        command.Add(CreateOrganisationsDeleteCommand());
+        command.Add(CreateOrganisationsUpdateCommand());
         return command;
     }
 
@@ -460,12 +458,12 @@ public sealed class HalleyCliApplication
         return command;
     }
 
-    private Command CreateOrganisationsPatchCommand()
+    private Command CreateOrganisationsUpdateCommand()
     {
         var idArgument = new Argument<int>("organisation-id") { Description = "The organisation id." };
         var options = CreateOrganisationWriteOptions();
 
-        var command = new Command("patch", "Patch an existing organisation.");
+        var command = new Command("update", "Update an existing organisation.");
         command.Add(idArgument);
         AddOrganisationWriteOptions(command, options);
         command.SetAction(async (parseResult, cancellationToken) =>
@@ -491,65 +489,6 @@ public sealed class HalleyCliApplication
         return command;
     }
 
-    private Command CreateOrganisationsPutCommand()
-    {
-        var idArgument = new Argument<int>("organisation-id") { Description = "The organisation id." };
-        var options = CreateOrganisationWriteOptions();
-
-        var command = new Command("put", "Replace an existing organisation.");
-        command.Add(idArgument);
-        AddOrganisationWriteOptions(command, options);
-        command.SetAction(async (parseResult, cancellationToken) =>
-        {
-            var outputMode = GetOutputMode(parseResult);
-            var apiClient = GetApiClient(parseResult);
-            if (apiClient.IsError)
-            {
-                return await WriteCliErrorAsync(apiClient.ErrorMessage!, outputMode, cancellationToken);
-            }
-
-            var token = await RequireTokenAsync(parseResult, outputMode, cancellationToken);
-            if (token is null)
-            {
-                return 1;
-            }
-
-            var request = BuildOrganisationRequest(parseResult, options);
-            var result = await apiClient.Value!.PutOrganisationAsync(token, parseResult.GetRequiredValue(idArgument), request, cancellationToken);
-            return await HandleApiResultAsync(result, outputMode, cancellationToken);
-        });
-
-        return command;
-    }
-
-    private Command CreateOrganisationsDeleteCommand()
-    {
-        var idArgument = new Argument<int>("organisation-id") { Description = "The organisation id." };
-
-        var command = new Command("delete", "Delete an organisation.");
-        command.Add(idArgument);
-        command.SetAction(async (parseResult, cancellationToken) =>
-        {
-            var outputMode = GetOutputMode(parseResult);
-            var apiClient = GetApiClient(parseResult);
-            if (apiClient.IsError)
-            {
-                return await WriteCliErrorAsync(apiClient.ErrorMessage!, outputMode, cancellationToken);
-            }
-
-            var token = await RequireTokenAsync(parseResult, outputMode, cancellationToken);
-            if (token is null)
-            {
-                return 1;
-            }
-
-            var result = await apiClient.Value!.DeleteOrganisationAsync(token, parseResult.GetRequiredValue(idArgument), cancellationToken);
-            return await HandleApiResultAsync(result, outputMode, cancellationToken);
-        });
-
-        return command;
-    }
-
     private Command CreateUsersCommand()
     {
         var command = new Command("users", "Manage users.");
@@ -557,9 +496,7 @@ public sealed class HalleyCliApplication
         command.Add(CreateUsersMeCommand());
         command.Add(CreateUsersGetCommand());
         command.Add(CreateUsersCreateCommand());
-        command.Add(CreateUsersPatchCommand());
-        command.Add(CreateUsersPutCommand());
-        command.Add(CreateUsersDeleteCommand());
+        command.Add(CreateUsersUpdateCommand());
         return command;
     }
 
@@ -691,12 +628,12 @@ public sealed class HalleyCliApplication
         return command;
     }
 
-    private Command CreateUsersPatchCommand()
+    private Command CreateUsersUpdateCommand()
     {
         var targetNameArgument = new Argument<string>("name") { Description = "The user name to update." };
         var options = CreateUserWriteOptions(requireCountry: false, useNewNameOption: true);
 
-        var command = new Command("patch", "Patch an existing user.");
+        var command = new Command("update", "Update an existing user.");
         command.Add(targetNameArgument);
         AddUserWriteOptions(command, options);
         command.SetAction(async (parseResult, cancellationToken) =>
@@ -721,70 +658,6 @@ public sealed class HalleyCliApplication
             }
 
             var result = await apiClient.Value!.PatchUserAsync(token, targetName, request!, cancellationToken);
-            return await HandleApiResultAsync(result, outputMode, cancellationToken);
-        });
-
-        return command;
-    }
-
-    private Command CreateUsersPutCommand()
-    {
-        var targetNameArgument = new Argument<string>("name") { Description = "The user name to replace." };
-        var options = CreateUserWriteOptions(requireCountry: false, useNewNameOption: true);
-
-        var command = new Command("put", "Replace an existing user.");
-        command.Add(targetNameArgument);
-        AddUserWriteOptions(command, options);
-        command.SetAction(async (parseResult, cancellationToken) =>
-        {
-            var outputMode = GetOutputMode(parseResult);
-            var apiClient = GetApiClient(parseResult);
-            if (apiClient.IsError)
-            {
-                return await WriteCliErrorAsync(apiClient.ErrorMessage!, outputMode, cancellationToken);
-            }
-
-            var token = await RequireTokenAsync(parseResult, outputMode, cancellationToken);
-            if (token is null)
-            {
-                return 1;
-            }
-
-            var targetName = parseResult.GetRequiredValue(targetNameArgument);
-            if (!TryBuildUserRequest(parseResult, options, out var request, out var error, targetName))
-            {
-                return await WriteCliErrorAsync(error!, outputMode, cancellationToken);
-            }
-
-            var result = await apiClient.Value!.PutUserAsync(token, targetName, request!, cancellationToken);
-            return await HandleApiResultAsync(result, outputMode, cancellationToken);
-        });
-
-        return command;
-    }
-
-    private Command CreateUsersDeleteCommand()
-    {
-        var nameArgument = new Argument<string>("name") { Description = "The user name." };
-
-        var command = new Command("delete", "Delete a user.");
-        command.Add(nameArgument);
-        command.SetAction(async (parseResult, cancellationToken) =>
-        {
-            var outputMode = GetOutputMode(parseResult);
-            var apiClient = GetApiClient(parseResult);
-            if (apiClient.IsError)
-            {
-                return await WriteCliErrorAsync(apiClient.ErrorMessage!, outputMode, cancellationToken);
-            }
-
-            var token = await RequireTokenAsync(parseResult, outputMode, cancellationToken);
-            if (token is null)
-            {
-                return 1;
-            }
-
-            var result = await apiClient.Value!.DeleteUserAsync(token, parseResult.GetRequiredValue(nameArgument), cancellationToken);
             return await HandleApiResultAsync(result, outputMode, cancellationToken);
         });
 
@@ -974,7 +847,7 @@ public sealed class HalleyCliApplication
         return true;
     }
 
-    private async Task<int> HandleLoginResultAsync(ApiCallResult result, string authType, OutputMode outputMode, CancellationToken cancellationToken)
+    private async Task<int> HandleLoginResultAsync(ApiCallResult result, string authType, ParseResult parseResult, OutputMode outputMode, CancellationToken cancellationToken)
     {
         if (!result.IsSuccessStatusCode)
         {
@@ -989,8 +862,9 @@ public sealed class HalleyCliApplication
 
         try
         {
-            await _sessionStore.SaveAsync(new SessionRecord(token, authType, DateTimeOffset.UtcNow), cancellationToken);
-            CurrentLogger.Information("Saved {AuthType} session token to {SessionPath}.", authType, _sessionStore.SessionPath);
+            var sessionEndpointKey = ResolveSessionEndpointKey(parseResult);
+            await _sessionStore.SaveAsync(sessionEndpointKey, new SessionRecord(token, authType, DateTimeOffset.UtcNow), cancellationToken);
+            CurrentLogger.Information("Saved {AuthType} session token for {Endpoint} to {SessionPath}.", authType, sessionEndpointKey, _sessionStore.SessionPath);
         }
         catch (Exception ex)
         {
@@ -1027,15 +901,16 @@ public sealed class HalleyCliApplication
 
         try
         {
-            var session = await _sessionStore.LoadAsync(cancellationToken);
+            var sessionEndpointKey = ResolveSessionEndpointKey(parseResult);
+            var session = await _sessionStore.LoadAsync(sessionEndpointKey, cancellationToken);
             if (!string.IsNullOrWhiteSpace(session?.Token))
             {
-                CurrentLogger.Information("Loaded a saved session token from {SessionPath}.", _sessionStore.SessionPath);
+                CurrentLogger.Information("Loaded a saved session token for {Endpoint} from {SessionPath}.", sessionEndpointKey, _sessionStore.SessionPath);
                 return session.Token;
             }
 
-            CurrentLogger.Warning("No saved session token was found at {SessionPath}.", _sessionStore.SessionPath);
-            await WriteCliErrorAsync("No saved session token was found. Run `login ...` first or pass `--token`.", outputMode, cancellationToken);
+            CurrentLogger.Warning("No saved session token was found for {Endpoint} at {SessionPath}.", sessionEndpointKey, _sessionStore.SessionPath);
+            await WriteCliErrorAsync($"No saved session token was found for `{sessionEndpointKey}`. Run `login ...` for that endpoint first or pass `--token`.", outputMode, cancellationToken);
             return null;
         }
         catch (Exception ex)
@@ -1060,6 +935,12 @@ public sealed class HalleyCliApplication
             CurrentLogger.Warning("Endpoint resolution failed: {Message}", ex.Message);
             return ApiClientResolution.Error(ex.Message);
         }
+    }
+
+    private string ResolveSessionEndpointKey(ParseResult parseResult)
+    {
+        var endpoint = parseResult.GetValue(_endpointOption);
+        return HalleyEndpointResolver.Resolve(endpoint).SessionKey;
     }
 
     private async Task<int> WriteSuccessAsync(CommandOutput output, OutputMode outputMode, CancellationToken cancellationToken)

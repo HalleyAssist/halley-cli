@@ -8,6 +8,8 @@ public sealed class HalleyApiClientOptions
 
     public Uri ApiBaseUri { get; init; } = new($"{DefaultEndpoint}/api");
 
+    public string SessionKey => AuthBaseUri.GetLeftPart(UriPartial.Path).TrimEnd('/');
+
     public static bool TryCreate(string? endpointInput, out HalleyApiClientOptions? options, out string? error)
     {
         options = null;
