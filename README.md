@@ -37,6 +37,16 @@ All commands also support `--log [level]`. Logs are written to stderr so stdout 
 
 `login user` accepts `--password`, but if it is omitted the CLI prompts for the password interactively.
 
+`calls create` also supports interactive prompting. When it is invoked without any call-creation options, the CLI asks the required questions on stderr and builds the request from your answers.
+
+In interactive terminals, the call prompts print suggestions and support Tab-cycling autocomplete for single-line fields such as organisation, call method, timezone, template, and question format.
+
+`calls create --wait` and `calls status --wait` poll the request and matching call results until a result exists or the optional `--timeout` expires.
+
+`calls create` and `calls status` also support `--delete`, which deletes the latest returned call result after it has been fetched. If no result is available yet, the command still succeeds and prints a warning on stderr.
+
+Calls can only be created for organisations with an active Hotline license. The CLI validates organisation and template references before creating the call.
+
 ## Examples
 
 ```bash
@@ -55,4 +65,22 @@ dotnet run --project ./src/Halley.App.Cli -- api-keys create \
   --permission ops_read_hubs \
   --permission ops_read_organisations \
   --expires-at 2026-06-01T00:00:00Z
+
+dotnet run --project ./src/Halley.App.Cli -- calls create
+
+dotnet run --project ./src/Halley.App.Cli -- calls create \
+  --organisation "Acme Care" \
+  --call-method phone \
+  --phone-number +61400000000 \
+  --recipient-name "Test User" \
+  --recipient-timezone Australia/Melbourne \
+  --template-uuid 2e1ef80b-6b2e-420f-a3df-6922baeea290 \
+  --question 1:boolean:"Were you able to speak with the resident?" \
+  --wait
+
+dotnet run --project ./src/Halley.App.Cli -- calls status request-uuid --delete
+
+dotnet run --project ./src/Halley.App.Cli -- calls status request-uuid --wait --timeout 2m --output json
+
+dotnet run --project ./src/Halley.App.Cli -- calls results request-uuid
 ```

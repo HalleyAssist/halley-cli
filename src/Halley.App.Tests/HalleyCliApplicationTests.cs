@@ -469,11 +469,627 @@ public sealed class HalleyCliApplicationTests
         Assert.Empty(harness.Requests);
     }
 
+    [Fact]
+    public async Task CallsCreateBuildsTemplateAndManualPayload()
+    {
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations/50" => OrganisationResponse(),
+                "/api/v1/call_templates" => CallTemplatesResponse((7, "template-uuid", "Wellbeing Check", 3)),
+                "/api/v1/call_requests" => AssertTemplateAndManualCallRequest(body!),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "phone",
+            "--phone-number", "+61400000000",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--template-uuid", "template-uuid",
+            "--template-id", "7",
+            "--instructions", "Please check in",
+            "--agenda", "Say hello",
+            "--note", "Weather was warm",
+            "--question", "1:boolean:Was the resident okay?",
+            "--token", "inline-token",
+            "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("request-1", JsonNode.Parse(harness.StdoutText)!["call_request"]?["uuid"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CallsCreateReadsInstructionsAndAgendaFromFiles()
+    {
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations/50" => OrganisationResponse(),
+                "/api/v1/call_requests" => AssertFileBackedCallRequest(body!),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var instructionsPath = Path.Combine(harness.TempDirectory, "instructions.txt");
+        var agendaPath = Path.Combine(harness.TempDirectory, "agenda.txt");
+        await File.WriteAllTextAsync(instructionsPath, "Line one\nLine two");
+        await File.WriteAllTextAsync(agendaPath, "Agenda one");
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--instructions-file", instructionsPath,
+            "--agenda-file", agendaPath,
+            "--token", "inline-token");
+
+        Assert.Equal(0, exitCode);
+    }
+
+    [Fact]
+    public async Task CallsCreatePromptsInteractivelyWhenNoCreateOptionsAreProvided()
+    {
+        var clock = new FakeAsyncClock();
+        var interactivePrompter = new StubInteractivePrompter(
+            isInteractive: true,
+            lineResponses:
+            [
+                "manual",
+                "Acme Care",
+                "phone",
+                "+61400000000",
+                "Test User",
+                "Australia/Melbourne",
+                "n",
+                "n"
+            ],
+            multilineResponses:
+            [
+                "Please check in",
+                string.Empty
+            ]);
+
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations" when request.RequestUri!.Query.Contains("size=200", StringComparison.Ordinal) => OrganisationsListResponse((50, "Acme Care", true), (51, "No License Org", false)),
+                "/api/v1/organisations" => OrganisationsListResponse((50, "Acme Care", true)),
+                "/api/v1/call_requests" => CreateInteractiveCallResponse(body!),
+                "/api/v1/call_requests/request-2" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-2","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"completed","call_data":{"call_method":"phone","phone_number":"+61400000000","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-2","hotline_call_request_uuid":"request-2","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        }, interactivePrompter: interactivePrompter, clock: clock);
+
+        var exitCode = await harness.RunAsync("calls", "create", "--token", "inline-token", "--wait", "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.True(interactivePrompter.LineCallCount > 0);
+        Assert.Contains("Call mode [template/manual/template+manual]:", harness.StderrText);
+        Assert.Empty(clock.Delays);
+        Assert.Contains("\"state\": \"completed\"", harness.StdoutText);
+        Assert.Contains(interactivePrompter.PromptRequests, request => request.Prompt == "Organisation: " && request.Suggestions.Any(suggestion => suggestion.Value == "Acme Care"));
+        Assert.Contains(interactivePrompter.PromptRequests, request => request.Prompt == "Call method [phone/web]: " && request.Suggestions.Any(suggestion => suggestion.Value == "phone"));
+        Assert.Contains(interactivePrompter.PromptRequests, request => request.Prompt == "Recipient timezone: " && request.Suggestions.Any(suggestion => suggestion.Value == "Australia/Melbourne"));
+        Assert.Contains(interactivePrompter.PromptRequests, request => request.Prompt == "Instructions" && request.IsMultiline && request.Suggestions.Count > 0);
+    }
+
+    [Fact]
+    public async Task CallsCreateWithoutOptionsFailsWhenConsoleIsNotInteractive()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{}"""));
+
+        var exitCode = await harness.RunAsync("calls", "create", "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("requires an interactive terminal", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task CallsCreateWithPartialOptionsDoesNotPrompt()
+    {
+        var interactivePrompter = new StubInteractivePrompter(isInteractive: true, lineResponses: ["manual"]);
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{}"""), interactivePrompter: interactivePrompter);
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(0, interactivePrompter.LineCallCount);
+        Assert.Contains("A valid --call-method value is required", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Theory]
+    [InlineData("phone", null, "`--phone-number` is required when `--call-method phone` is used.")]
+    [InlineData("web", "+61400000000", "`--phone-number` cannot be used when `--call-method web` is selected.")]
+    public async Task CallsCreateValidatesPhoneInputs(string callMethod, string? phoneNumber, string expectedError)
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{}"""));
+
+        var args = new List<string>
+        {
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", callMethod,
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--instructions", "Please check in",
+            "--token", "inline-token"
+        };
+
+        if (phoneNumber is not null)
+        {
+            args.Add("--phone-number");
+            args.Add(phoneNumber);
+        }
+
+        var exitCode = await harness.RunAsync(args.ToArray());
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains(expectedError, harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task CallsCreateRejectsTemplateIdWithoutTemplateUuid()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{}"""));
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--template-id", "7",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("`--template-id` requires `--template-uuid`.", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task CallsCreateRejectsMissingTemplateAndManualContent()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{}"""));
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--note", "This alone is not enough",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Provide `--template-uuid` or at least one of", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task CallsCreateRejectsMalformedQuestion()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{}"""));
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--instructions", "Please check in",
+            "--question", "oops",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Invalid --question value `oops`", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task CallsStatusDerivesQueuedState()
+    {
+        using var harness = new TestHarness((request, _) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/call_requests/request-1" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-1","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"pending","call_data":{"call_method":"phone","phone_number":"+61400000000","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[]}"""),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var exitCode = await harness.RunAsync("calls", "status", "request-1", "--token", "inline-token", "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
+        Assert.Equal("queued", payload["state"]?.GetValue<string>());
+        Assert.Equal(0, payload["result_count"]?.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task CallsStatusWaitsUntilAResultExists()
+    {
+        var clock = new FakeAsyncClock();
+        var resultRequests = 0;
+        using var harness = new TestHarness((request, _) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/call_requests/request-1" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-1","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"active","call_data":{"call_method":"phone","phone_number":"+61400000000","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
+                "/api/v1/call_results" when resultRequests++ == 0 => JsonResponse(HttpStatusCode.OK, """{"call_results":[]}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-1","hotline_call_request_uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        }, clock: clock);
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "status",
+            "request-1",
+            "--token", "inline-token",
+            "--wait",
+            "--poll-every", "5s",
+            "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.Single(clock.Delays);
+        Assert.Equal(TimeSpan.FromSeconds(5), clock.Delays[0]);
+        var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
+        Assert.Equal("completed", payload["state"]?.GetValue<string>());
+        Assert.False(payload["timed_out"]?.GetValue<bool>());
+        Assert.True(payload["waited"]?.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task CallsStatusTimeoutReturnsNonZeroAndPrintsSummary()
+    {
+        var clock = new FakeAsyncClock();
+        using var harness = new TestHarness((request, _) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/call_requests/request-1" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-1","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"pending","call_data":{"call_method":"phone","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[]}"""),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        }, clock: clock);
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "status",
+            "request-1",
+            "--token", "inline-token",
+            "--wait",
+            "--poll-every", "5s",
+            "--timeout", "10s",
+            "--output", "json");
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(2, clock.Delays.Count);
+        Assert.Equal(TimeSpan.FromSeconds(5), clock.Delays[0]);
+        Assert.Equal(TimeSpan.FromSeconds(5), clock.Delays[1]);
+        var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
+        Assert.Equal("queued", payload["state"]?.GetValue<string>());
+        Assert.True(payload["timed_out"]?.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task CallsResultsUsesFilteredEndpointAndRendersHumanTable()
+    {
+        using var harness = new TestHarness((_, _) =>
+            JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-2","hotline_call_request_uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:58:58.611Z","answered_at":"2026-02-18T08:58:59.611Z","status":"success","result":"answered"},{"uuid":"result-1","hotline_call_request_uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"failed","result":"busy"}]}"""));
+
+        var exitCode = await harness.RunAsync("calls", "results", "request-1", "--token", "inline-token");
+
+        Assert.Equal(0, exitCode);
+        Assert.Single(harness.Requests);
+        Assert.Contains("/api/v1/call_results?", harness.Requests[0].Uri);
+        Assert.Contains("hotline_call_request_uuid=request-1", harness.Requests[0].Uri);
+        Assert.Contains("order=created_at DESC", harness.Requests[0].Uri);
+        Assert.Contains("uuid", harness.StdoutText);
+        Assert.Contains("result-2", harness.StdoutText);
+        Assert.Contains("answered", harness.StdoutText);
+        Assert.DoesNotContain("\"call_results\"", harness.StdoutText);
+    }
+
+    [Fact]
+    public async Task CallsCreateWaitsForResultWhenRequested()
+    {
+        var clock = new FakeAsyncClock();
+        var resultRequests = 0;
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations/50" => OrganisationResponse(),
+                "/api/v1/call_requests" => JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-3","status":"pending"}}"""),
+                "/api/v1/call_requests/request-3" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-3","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"active","call_data":{"call_method":"web","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
+                "/api/v1/call_results" when resultRequests++ == 0 => JsonResponse(HttpStatusCode.OK, """{"call_results":[]}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-3","hotline_call_request_uuid":"request-3","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
+                _ => throw new InvalidOperationException($"{request.RequestUri} {body}")
+            };
+        }, clock: clock);
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--instructions", "Please check in",
+            "--token", "inline-token",
+            "--wait",
+            "--poll-every", "5s",
+            "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.Single(clock.Delays);
+        Assert.Equal(TimeSpan.FromSeconds(5), clock.Delays[0]);
+        var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
+        Assert.Equal("request-3", payload["call_request_uuid"]?.GetValue<string>());
+        Assert.Equal("completed", payload["state"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CallsCreateAcceptsOrganisationNameArgument()
+    {
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations" => OrganisationsListResponse((50, "Acme Care", true)),
+                "/api/v1/call_requests" => AssertNamedOrganisationCallRequest(body!),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation", "Acme Care",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--instructions", "Please check in",
+            "--token", "inline-token",
+            "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("request-by-name", JsonNode.Parse(harness.StdoutText)!["call_request"]?["uuid"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task CallsCreateRejectsOrganisationWithoutHotlineLicense()
+    {
+        using var harness = new TestHarness((request, _) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations/50" => OrganisationResponse(hotlineLicensed: false),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--instructions", "Please check in",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("does not have an active Hotline license", harness.StderrText);
+        Assert.DoesNotContain(harness.Requests, request => request.Uri.Contains("/api/v1/call_requests", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CallsCreateRejectsUnknownTemplateVersionId()
+    {
+        using var harness = new TestHarness((request, _) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations/50" => OrganisationResponse(),
+                "/api/v1/call_templates" => CallTemplatesResponse((7, "template-uuid", "Wellbeing Check", 3)),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--template-uuid", "template-uuid",
+            "--template-id", "99",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("does not have version id `99`", harness.StderrText);
+        Assert.DoesNotContain(harness.Requests, request => request.Uri.Contains("/api/v1/call_requests", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CallsCreateDeleteWithoutResultWarnsAndReturnsStatusSummary()
+    {
+        using var harness = new TestHarness((request, _) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations/50" => OrganisationResponse(),
+                "/api/v1/call_requests" => JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-delete","status":"pending"}}"""),
+                "/api/v1/call_requests/request-delete" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-delete","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"pending","call_data":{"call_method":"web","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[]}"""),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--instructions", "Please check in",
+            "--token", "inline-token",
+            "--delete",
+            "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("No call result was available to delete", harness.StderrText);
+        var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
+        Assert.Equal("queued", payload["state"]?.GetValue<string>());
+        Assert.False(payload["deleted_call_result"]?.GetValue<bool>());
+        Assert.DoesNotContain(harness.Requests, request => request.Method == HttpMethod.Delete);
+    }
+
+    [Fact]
+    public async Task CallsStatusDeleteRemovesLatestResult()
+    {
+        using var harness = new TestHarness((request, _) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/call_requests/request-1" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-1","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"completed","call_data":{"call_method":"web","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-delete-1","hotline_call_request_uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
+                "/api/v1/call_results/result-delete-1" => JsonResponse(HttpStatusCode.NoContent, string.Empty),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "status",
+            "request-1",
+            "--token", "inline-token",
+            "--delete",
+            "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains(harness.Requests, request => request.Method == HttpMethod.Delete && request.Uri.EndsWith("/api/v1/call_results/result-delete-1", StringComparison.Ordinal));
+        var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
+        Assert.True(payload["deleted_call_result"]?.GetValue<bool>());
+        Assert.Equal("result-delete-1", payload["deleted_call_result_uuid"]?.GetValue<string>());
+    }
+
     private static HttpResponseMessage JsonResponse(HttpStatusCode statusCode, string json) =>
         new(statusCode)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
+
+    private static HttpResponseMessage CreateInteractiveCallResponse(string body)
+    {
+        var callRequest = JsonNode.Parse(body)!.AsObject()["call_request"]!.AsObject();
+        Assert.Equal("Please check in", callRequest["instructions"]?.GetValue<string>());
+        Assert.Equal("+61400000000", callRequest["call_data"]?["phone_number"]?.GetValue<string>());
+        return JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-2","status":"pending"}}""");
+    }
+
+    private static HttpResponseMessage AssertTemplateAndManualCallRequest(string body)
+    {
+        var callRequest = JsonNode.Parse(body)!.AsObject()["call_request"]!.AsObject();
+        Assert.Equal(50, callRequest["organisation_id"]?.GetValue<int>());
+        Assert.Equal("template-uuid", callRequest["hotline_call_template_uuid"]?.GetValue<string>());
+        Assert.Equal(7, callRequest["hotline_call_template_id"]?.GetValue<int>());
+        Assert.Equal("Please check in", callRequest["instructions"]?.GetValue<string>());
+        Assert.Equal("Say hello", callRequest["agenda"]?.GetValue<string>());
+        Assert.Equal("Weather was warm", callRequest["call_notes"]?[0]?.GetValue<string>());
+        Assert.Equal(1, callRequest["result_questions"]?[0]?["id"]?.GetValue<int>());
+        Assert.Equal("boolean", callRequest["result_questions"]?[0]?["format"]?.GetValue<string>());
+        Assert.Equal("Was the resident okay?", callRequest["result_questions"]?[0]?["text"]?.GetValue<string>());
+        Assert.Equal("phone", callRequest["call_data"]?["call_method"]?.GetValue<string>());
+        Assert.Equal("+61400000000", callRequest["call_data"]?["phone_number"]?.GetValue<string>());
+        Assert.Equal("Test User", callRequest["call_data"]?["recipient_name"]?.GetValue<string>());
+        Assert.Equal("Australia/Melbourne", callRequest["call_data"]?["recipient_timezone"]?.GetValue<string>());
+        return JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-1","status":"pending"}}""");
+    }
+
+    private static HttpResponseMessage AssertFileBackedCallRequest(string body)
+    {
+        var callRequest = JsonNode.Parse(body)!.AsObject()["call_request"]!.AsObject();
+        Assert.Equal("Line one\nLine two", callRequest["instructions"]?.GetValue<string>());
+        Assert.Equal("Agenda one", callRequest["agenda"]?.GetValue<string>());
+        return JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-1"}}""");
+    }
+
+    private static HttpResponseMessage AssertNamedOrganisationCallRequest(string body)
+    {
+        var callRequest = JsonNode.Parse(body)!.AsObject()["call_request"]!.AsObject();
+        Assert.Equal(50, callRequest["organisation_id"]?.GetValue<int>());
+        Assert.Equal("Please check in", callRequest["instructions"]?.GetValue<string>());
+        return JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-by-name","status":"pending"}}""");
+    }
+
+    private static HttpResponseMessage OrganisationResponse(int id = 50, string name = "Acme Care", bool hotlineLicensed = true) =>
+        JsonResponse(HttpStatusCode.OK, new JsonObject
+        {
+            ["organisation"] = new JsonObject
+            {
+                ["id"] = id,
+                ["name"] = name,
+                ["active_license_hotline"] = hotlineLicensed
+            }
+        }.ToJsonString());
+
+    private static HttpResponseMessage OrganisationsListResponse(params (int Id, string Name, bool HotlineLicensed)[] organisations) =>
+        JsonResponse(HttpStatusCode.OK, new JsonObject
+        {
+            ["organisations"] = new JsonArray(
+                organisations
+                    .Select(organisation => (JsonNode)new JsonObject
+                    {
+                        ["id"] = organisation.Id,
+                        ["name"] = organisation.Name,
+                        ["active_license_hotline"] = organisation.HotlineLicensed
+                    })
+                    .ToArray())
+        }.ToJsonString());
+
+    private static HttpResponseMessage CallTemplatesResponse(params (int Id, string Uuid, string Name, int Version)[] templates) =>
+        JsonResponse(HttpStatusCode.OK, new JsonObject
+        {
+            ["call_templates"] = new JsonArray(
+                templates
+                    .Select(template => (JsonNode)new JsonObject
+                    {
+                        ["id"] = template.Id,
+                        ["uuid"] = template.Uuid,
+                        ["name"] = template.Name,
+                        ["version"] = template.Version
+                    })
+                    .ToArray())
+        }.ToJsonString());
 
     private sealed class TestHarness : IDisposable
     {
@@ -483,7 +1099,11 @@ public sealed class HalleyCliApplicationTests
         private readonly StringWriter _stdout = new();
         private readonly StringWriter _stderr = new();
 
-        public TestHarness(Func<HttpRequestMessage, string?, HttpResponseMessage> responder, IPasswordPrompt? passwordPrompt = null)
+        public TestHarness(
+            Func<HttpRequestMessage, string?, HttpResponseMessage> responder,
+            IPasswordPrompt? passwordPrompt = null,
+            IInteractivePrompter? interactivePrompter = null,
+            IAsyncClock? clock = null)
         {
             _tempDirectory = Path.Combine(Path.GetTempPath(), "halley-cli-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_tempDirectory);
@@ -496,12 +1116,16 @@ public sealed class HalleyCliApplicationTests
                 SessionStore,
                 _stdout,
                 _stderr,
-                passwordPrompt);
+                passwordPrompt,
+                interactivePrompter ?? new StubInteractivePrompter(isInteractive: false),
+                clock);
         }
 
         public HalleyCliApplication Application { get; }
 
         public FileSessionStore SessionStore { get; }
+
+        public string TempDirectory => _tempDirectory;
 
         public IReadOnlyList<RecordedRequest> Requests => _handler.Requests;
 
@@ -552,6 +1176,63 @@ public sealed class HalleyCliApplicationTests
         }
     }
 
+    private sealed class StubInteractivePrompter(
+        bool isInteractive,
+        IEnumerable<string?>? lineResponses = null,
+        IEnumerable<string?>? multilineResponses = null) : IInteractivePrompter
+    {
+        private readonly Queue<string?> _lineResponses = new(lineResponses ?? []);
+        private readonly Queue<string?> _multilineResponses = new(multilineResponses ?? []);
+
+        public bool IsInteractive { get; } = isInteractive;
+
+        public int LineCallCount { get; private set; }
+
+        public int MultilineCallCount { get; private set; }
+
+        public List<PromptRequest> PromptRequests { get; } = [];
+
+        public async Task<string?> ReadLineAsync(
+            TextWriter output,
+            string prompt,
+            IReadOnlyList<InteractiveSuggestion>? suggestions = null,
+            string? helpText = null,
+            CancellationToken cancellationToken = default)
+        {
+            LineCallCount++;
+            PromptRequests.Add(new PromptRequest(prompt, suggestions ?? [], helpText, IsMultiline: false));
+            await output.WriteAsync(prompt.AsMemory(), cancellationToken);
+            return _lineResponses.Count > 0 ? _lineResponses.Dequeue() : null;
+        }
+
+        public async Task<string?> ReadMultilineAsync(
+            TextWriter output,
+            string prompt,
+            IReadOnlyList<InteractiveSuggestion>? suggestions = null,
+            string? helpText = null,
+            CancellationToken cancellationToken = default)
+        {
+            MultilineCallCount++;
+            PromptRequests.Add(new PromptRequest(prompt, suggestions ?? [], helpText, IsMultiline: true));
+            await output.WriteLineAsync(prompt.AsMemory(), cancellationToken);
+            return _multilineResponses.Count > 0 ? _multilineResponses.Dequeue() : null;
+        }
+    }
+
+    private sealed class FakeAsyncClock : IAsyncClock
+    {
+        public DateTimeOffset UtcNow { get; private set; } = new(2026, 2, 18, 8, 55, 58, TimeSpan.Zero);
+
+        public List<TimeSpan> Delays { get; } = [];
+
+        public Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken = default)
+        {
+            Delays.Add(delay);
+            UtcNow += delay;
+            return Task.CompletedTask;
+        }
+    }
+
     private static string DefaultSessionKey => HalleyEndpointResolver.Resolve(HalleyApiClientOptions.DefaultEndpoint).SessionKey;
 
     private static int CountOccurrences(string text, string value)
@@ -571,6 +1252,8 @@ public sealed class HalleyCliApplicationTests
 
         return count;
     }
+
+    private sealed record PromptRequest(string Prompt, IReadOnlyList<InteractiveSuggestion> Suggestions, string? HelpText, bool IsMultiline);
 
     private sealed record RecordedRequest(HttpMethod Method, string Uri, AuthenticationHeaderValue? Authorization, string? Body);
 }

@@ -48,6 +48,48 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
     public Task<ApiCallResult> LoginApiKeyAsync(ApiKeyLoginRequest request, CancellationToken cancellationToken = default) =>
         SendAsync(HttpMethod.Post, _options.AuthBaseUri, "/auth/api_key", null, request, null, cancellationToken);
 
+    public Task<ApiCallResult> CreateCallRequestAsync(string token, CallRequestCreateRequest request, CancellationToken cancellationToken = default) =>
+        SendAsync(HttpMethod.Post, _options.ApiBaseUri, "/v1/call_requests", token, request, null, cancellationToken);
+
+    public Task<ApiCallResult> GetCallRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default) =>
+        SendAsync(HttpMethod.Get, _options.ApiBaseUri, $"/v1/call_requests/{Uri.EscapeDataString(callRequestUuid)}", token, null, null, cancellationToken);
+
+    public Task<ApiCallResult> ListCallResultsForRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default) =>
+        SendAsync(
+            HttpMethod.Get,
+            _options.ApiBaseUri,
+            "/v1/call_results",
+            token,
+            null,
+            new Dictionary<string, string?>
+            {
+                ["hotline_call_request_uuid"] = callRequestUuid,
+                ["order"] = "created_at DESC"
+            },
+            cancellationToken);
+
+    public Task<ApiCallResult> DeleteCallResultAsync(string token, string callResultUuid, CancellationToken cancellationToken = default) =>
+        SendAsync(HttpMethod.Delete, _options.ApiBaseUri, $"/v1/call_results/{Uri.EscapeDataString(callResultUuid)}", token, null, null, cancellationToken);
+
+    public Task<ApiCallResult> ListCallTemplatesAsync(string token, ListCallTemplatesQuery query, CancellationToken cancellationToken = default) =>
+        SendAsync(
+            HttpMethod.Get,
+            _options.ApiBaseUri,
+            "/v1/call_templates",
+            token,
+            null,
+            new Dictionary<string, string?>
+            {
+                ["offset"] = query.Offset?.ToString(),
+                ["order"] = query.Order,
+                ["size"] = query.Size?.ToString(),
+                ["organisation_id"] = query.OrganisationId?.ToString(),
+                ["for_organisation_id"] = query.ForOrganisationId?.ToString(),
+                ["all_versions"] = query.AllVersions?.ToString()?.ToLowerInvariant(),
+                ["uuid"] = query.Uuid
+            },
+            cancellationToken);
+
     public Task<ApiCallResult> ListApiKeysAsync(string token, int? organisationId, CancellationToken cancellationToken = default) =>
         SendAsync(
             HttpMethod.Get,

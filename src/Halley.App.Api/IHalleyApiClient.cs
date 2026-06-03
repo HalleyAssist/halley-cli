@@ -6,6 +6,16 @@ public interface IHalleyApiClient
 
     Task<ApiCallResult> LoginApiKeyAsync(ApiKeyLoginRequest request, CancellationToken cancellationToken = default);
 
+    Task<ApiCallResult> CreateCallRequestAsync(string token, CallRequestCreateRequest request, CancellationToken cancellationToken = default);
+
+    Task<ApiCallResult> GetCallRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default);
+
+    Task<ApiCallResult> ListCallResultsForRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default);
+
+    Task<ApiCallResult> DeleteCallResultAsync(string token, string callResultUuid, CancellationToken cancellationToken = default);
+
+    Task<ApiCallResult> ListCallTemplatesAsync(string token, ListCallTemplatesQuery query, CancellationToken cancellationToken = default);
+
     Task<ApiCallResult> ListApiKeysAsync(string token, int? organisationId, CancellationToken cancellationToken = default);
 
     Task<ApiCallResult> GetApiKeyAsync(string token, string id, CancellationToken cancellationToken = default);

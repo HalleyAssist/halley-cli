@@ -23,6 +23,7 @@ public sealed class HalleyOutputFormatter
             CommandOutputKind.Token => output.Token ?? string.Empty,
             CommandOutputKind.Version => $"Version: {output.Version}{Environment.NewLine}Git SHA: {output.GitSha}",
             CommandOutputKind.Empty => string.Empty,
+            CommandOutputKind.JsonPayload when output.HumanPayload is not null => FormatHumanPayload(output.HumanPayload),
             CommandOutputKind.JsonPayload when output.JsonPayload is not null => FormatHumanPayload(output.JsonPayload),
             _ => string.Empty
         };
