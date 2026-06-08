@@ -4,6 +4,8 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Styling;
 using Consolonia;
 using Consolonia.Themes;
 
@@ -143,6 +145,35 @@ internal sealed class ConsoloniaPromptApplication : Application
     public override void Initialize()
     {
         Styles.Add(new ModernTheme());
+        Styles.Add(new Style(x => x.OfType<TextBox>().Class("invalid"))
+        {
+            Setters =
+            {
+                new Setter(TextBox.ForegroundProperty, Brushes.IndianRed)
+            }
+        });
+        Styles.Add(new Style(x => x.OfType<AutoCompleteBox>().Class("invalid"))
+        {
+            Setters =
+            {
+                new Setter(AutoCompleteBox.ForegroundProperty, Brushes.IndianRed)
+            }
+        });
+        Styles.Add(new Style(x => x.OfType<Border>().Class("invalid-field"))
+        {
+            Setters =
+            {
+                new Setter(Border.BorderBrushProperty, Brushes.IndianRed),
+                new Setter(Border.BorderThicknessProperty, new Thickness(1))
+            }
+        });
+        Styles.Add(new Style(x => x.OfType<TextBlock>().Class("field-error"))
+        {
+            Setters =
+            {
+                new Setter(TextBlock.ForegroundProperty, Brushes.IndianRed)
+            }
+        });
     }
 
     public override void OnFrameworkInitializationCompleted()
@@ -289,6 +320,19 @@ internal sealed class PasswordPromptWindow : InteractiveDialogWindow<string?>
 
 internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<InteractiveCallCreateResult>
 {
+    private sealed class ValidatedFieldState
+    {
+        public required StackPanel Panel { get; init; }
+
+        public required Border Border { get; init; }
+
+        public required Control Control { get; init; }
+
+        public required TextBlock ErrorText { get; init; }
+
+        public required Func<string?> Validator { get; init; }
+    }
+
     private enum WizardStep
     {
         CallSetup,
@@ -305,26 +349,34 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
     private readonly TextBlock _stepTitleText;
     private readonly TextBlock _stepHintText;
     private readonly AutoCompleteBox _organisationBox;
+    private readonly ValidatedFieldState _organisationValidation;
     private readonly TextBlock _organisationInfo;
-    private readonly TextBlock _organisationErrorText;
     private readonly RadioButton _templateModeButton;
     private readonly RadioButton _manualModeButton;
     private readonly RadioButton _bothModeButton;
     private readonly RadioButton _phoneMethodButton;
     private readonly RadioButton _webMethodButton;
     private readonly TextBox _phoneNumberBox;
+    private readonly ValidatedFieldState _phoneNumberValidation;
     private readonly AutoCompleteBox _timezoneBox;
+    private readonly ValidatedFieldState _timezoneValidation;
     private readonly TextBox _recipientNameBox;
+    private readonly ValidatedFieldState _recipientNameValidation;
     private readonly AutoCompleteBox _templateBox;
+    private readonly ValidatedFieldState _templateValidation;
     private readonly TextBlock _templateInfo;
     private readonly AutoCompleteBox _templateVersionBox;
+    private readonly ValidatedFieldState _templateVersionValidation;
     private readonly TextBox _instructionsBox;
     private readonly TextBox _agendaBox;
     private readonly TextBox _noteInputBox;
     private readonly ListBox _notesListBox;
     private readonly TextBox _questionIdBox;
+    private readonly ValidatedFieldState _questionIdValidation;
     private readonly AutoCompleteBox _questionFormatBox;
+    private readonly ValidatedFieldState _questionFormatValidation;
     private readonly TextBox _questionTextBox;
+    private readonly ValidatedFieldState _questionTextValidation;
     private readonly ListBox _questionsListBox;
     private readonly StackPanel _setupPanel;
     private readonly StackPanel _templatePanel;
@@ -336,12 +388,14 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
     private readonly TextBlock _errorText;
     private readonly Button _backButton;
     private readonly Button _nextButton;
+    private readonly Button _showCommandButton;
     private readonly Button _createButton;
     private IReadOnlyList<InteractiveSuggestion> _currentTemplateSuggestions = [];
     private IReadOnlyList<InteractiveSuggestion> _currentTemplateVersionSuggestions = [];
     private WizardStep _currentStep = WizardStep.CallSetup;
     private CancellationTokenSource? _templateRefreshCancellation;
     private CancellationTokenSource? _templateVersionRefreshCancellation;
+    private Control? _lastValidationFocusTarget;
 
     public CallCreateWizardWindow(
         InteractiveCallCreateRequest request,
@@ -364,18 +418,47 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
         _manualModeButton.IsChecked = true;
 
         _organisationBox = CreateAutoCompleteBox(_request.Organisations, "Search by organisation name");
+        _organisationValidation = CreateValidatedField(
+            "Organisation",
+            _organisationBox,
+            ValidateOrganisationField,
+            "Select or type an organisation name. You can still paste an organisation id if needed.");
         _organisationInfo = new TextBlock();
-        _organisationErrorText = new TextBlock();
         _phoneMethodButton = new RadioButton { Content = "Phone" };
         _webMethodButton = new RadioButton { Content = "Web", GroupName = _phoneMethodButton.GroupName };
         _phoneMethodButton.IsChecked = true;
         _phoneNumberBox = new TextBox { Watermark = "+61400000000" };
+        _phoneNumberValidation = CreateValidatedField(
+            "Phone number",
+            _phoneNumberBox,
+            ValidatePhoneNumberField,
+            "Required when call method is phone. Use an international number such as +61400000000.");
         _recipientNameBox = new TextBox { Watermark = "Test User" };
+        _recipientNameValidation = CreateValidatedField(
+            "Recipient name",
+            _recipientNameBox,
+            ValidateRecipientNameField,
+            "Who should receive the call.");
         _timezoneBox = CreateAutoCompleteBox(_request.Timezones, "Australia/Melbourne");
+        _timezoneValidation = CreateValidatedField(
+            "Recipient timezone",
+            _timezoneBox,
+            ValidateRecipientTimezoneField,
+            "Use a valid IANA timezone such as Australia/Melbourne.");
 
         _templateBox = CreateAutoCompleteBox([], "Template name or uuid");
+        _templateValidation = CreateValidatedField(
+            "Template",
+            _templateBox,
+            ValidateTemplateField,
+            "Start typing to filter visible templates for the selected organisation.");
         _templateInfo = new TextBlock();
         _templateVersionBox = CreateAutoCompleteBox([], "Specific version id (optional)");
+        _templateVersionValidation = CreateValidatedField(
+            "Template version",
+            _templateVersionBox,
+            ValidateTemplateVersionField,
+            "Optional specific version id. Leave blank to use the latest visible version.");
 
         _instructionsBox = CreateMultilineTextBox("Describe how the agent should behave.");
         _agendaBox = CreateMultilineTextBox("Outline the steps or talking points.");
@@ -385,17 +468,30 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
         RefreshNotesList();
 
         _questionIdBox = new TextBox { Watermark = "1", Width = 8 };
+        _questionIdValidation = CreateCompactValidatedField("Id", _questionIdBox, ValidateQuestionIdField);
         _questionFormatBox = CreateAutoCompleteBox(
             [
                 new("string", "Free text response"),
                 new("boolean", "Yes or no response")
             ],
             "string");
+        _questionFormatValidation = CreateCompactValidatedField("Format", _questionFormatBox, ValidateQuestionFormatField);
         _questionTextBox = new TextBox { Watermark = "Was the resident okay?" };
+        _questionTextValidation = CreateCompactValidatedField("Question", _questionTextBox, ValidateQuestionTextField);
         _questionsListBox = new ListBox();
         RefreshQuestionsList();
 
-        _phonePanel = CreateFieldPanel("Phone number", _phoneNumberBox, "Required when call method is phone.");
+        RegisterValidatedField(_organisationValidation);
+        RegisterValidatedField(_phoneNumberValidation);
+        RegisterValidatedField(_recipientNameValidation);
+        RegisterValidatedField(_timezoneValidation);
+        RegisterValidatedField(_templateValidation);
+        RegisterValidatedField(_templateVersionValidation);
+        RegisterValidatedField(_questionIdValidation);
+        RegisterValidatedField(_questionFormatValidation);
+        RegisterValidatedField(_questionTextValidation);
+
+        _phonePanel = _phoneNumberValidation.Panel;
         _reviewSummaryText = new TextBlock();
         _errorText = new TextBlock();
 
@@ -427,8 +523,9 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
         var addQuestionButton = new Button { Content = "Add question" };
         addQuestionButton.Click += (_, _) =>
         {
-            if (!TryAddQuestionFromEditor(out var error))
+            if (!TryAddQuestionFromEditor(out var error, out var firstInvalidControl))
             {
+                FocusValidationControl(firstInvalidControl);
                 _errorText.Text = error;
                 return;
             }
@@ -474,6 +571,30 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
 
         _nextButton = new Button { Content = "Next" };
         _nextButton.Click += (_, _) => MoveNext();
+
+        _showCommandButton = new Button { Content = "Show command" };
+        _showCommandButton.Click += (_, _) =>
+        {
+            if (!TryBuildResult(out var result, out var error))
+            {
+                _errorText.Text = error;
+                return;
+            }
+
+            _errorText.Text = string.Empty;
+            Complete(InteractiveCallCreateResult.ShowCommandResult(
+                result!.OrganisationReference,
+                result.CallMethod,
+                result.PhoneNumber,
+                result.RecipientName,
+                result.RecipientTimezone,
+                result.TemplateReference,
+                result.TemplateId,
+                result.Instructions,
+                result.Agenda,
+                result.Notes,
+                result.Questions));
+        };
 
         _createButton = new Button { Content = "Create call" };
         _createButton.Click += (_, _) =>
@@ -522,7 +643,7 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
                 {
                     Orientation = Orientation.Horizontal,
                     Spacing = 1,
-                    Children = { cancelButton, _backButton, _nextButton, _createButton }
+                    Children = { cancelButton, _backButton, _nextButton, _showCommandButton, _createButton }
                 }
             }
         };
@@ -563,7 +684,13 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
                         {
                             Orientation = Orientation.Horizontal,
                             Spacing = 1,
-                            Children = { _questionIdBox, _questionFormatBox, _questionTextBox, addQuestionButton }
+                            Children =
+                            {
+                                _questionIdValidation.Panel,
+                                _questionFormatValidation.Panel,
+                                _questionTextValidation.Panel,
+                                addQuestionButton
+                            }
                         },
                         _questionsListBox,
                         removeQuestionButton
@@ -598,9 +725,8 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
                         Children = { _templateModeButton, _manualModeButton, _bothModeButton }
                     },
                     "Choose whether to use a template, manual content, or both."),
-                CreateFieldPanel("Organisation", _organisationBox, "Select or type an organisation name. You can still paste an organisation id if needed."),
+                _organisationValidation.Panel,
                 _organisationInfo,
-                _organisationErrorText,
                 CreateFieldPanel(
                     "Call method",
                     new StackPanel
@@ -611,8 +737,8 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
                     },
                     "Choose how the call should be delivered."),
                 _phonePanel,
-                CreateFieldPanel("Recipient name", _recipientNameBox, "Who should receive the call."),
-                CreateFieldPanel("Recipient timezone", _timezoneBox, "Use an IANA timezone such as Australia/Melbourne.")
+                _recipientNameValidation.Panel,
+                _timezoneValidation.Panel
             }
         };
 
@@ -622,9 +748,9 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
             Spacing = 1,
             Children =
             {
-                CreateFieldPanel("Template", _templateBox, "Start typing to filter visible templates for the selected organisation."),
+                _templateValidation.Panel,
                 _templateInfo,
-                CreateFieldPanel("Template version", _templateVersionBox, "Optional specific version id. Leave blank to use the latest visible version.")
+                _templateVersionValidation.Panel
             }
         };
 
@@ -661,6 +787,77 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
         }
 
         return panel;
+    }
+
+    private static ValidatedFieldState CreateValidatedField(
+        string label,
+        Control control,
+        Func<string?> validator,
+        string? helpText = null)
+    {
+        var border = new Border
+        {
+            Child = control
+        };
+        var errorText = CreateValidationTextBlock();
+        var panel = new StackPanel { Spacing = 1 };
+        panel.Children.Add(new TextBlock { Text = label });
+        panel.Children.Add(border);
+        panel.Children.Add(errorText);
+        if (!string.IsNullOrWhiteSpace(helpText))
+        {
+            panel.Children.Add(new TextBlock { Text = helpText });
+        }
+
+        return new ValidatedFieldState
+        {
+            Panel = panel,
+            Border = border,
+            Control = control,
+            ErrorText = errorText,
+            Validator = validator
+        };
+    }
+
+    private static ValidatedFieldState CreateCompactValidatedField(
+        string label,
+        Control control,
+        Func<string?> validator)
+    {
+        var border = new Border
+        {
+            Child = control
+        };
+        var errorText = CreateValidationTextBlock();
+        var panel = new StackPanel
+        {
+            Spacing = 1,
+            Children =
+            {
+                new TextBlock { Text = label },
+                border,
+                errorText
+            }
+        };
+
+        return new ValidatedFieldState
+        {
+            Panel = panel,
+            Border = border,
+            Control = control,
+            ErrorText = errorText,
+            Validator = validator
+        };
+    }
+
+    private static TextBlock CreateValidationTextBlock()
+    {
+        var textBlock = new TextBlock
+        {
+            IsVisible = false
+        };
+        textBlock.Classes.Add("field-error");
+        return textBlock;
     }
 
     private static AutoCompleteBox CreateAutoCompleteBox(
@@ -702,6 +899,7 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
     private void UpdateVisibility()
     {
         _phonePanel.IsVisible = IsPhoneModeSelected();
+        ClearInactiveValidationStates();
         UpdateWizardStepUi();
     }
 
@@ -709,9 +907,6 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
     {
         var suggestion = FindSuggestion(_request.Organisations, _organisationBox.Text);
         _organisationInfo.Text = suggestion?.Description ?? string.Empty;
-        _organisationErrorText.Text = SelectedOrganisationLacksHotlineLicense(suggestion)
-            ? "The selected organisation does not have an active Hotline license."
-            : string.Empty;
     }
 
     private void UpdateTemplateInfo()
@@ -749,6 +944,7 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
 
         _backButton.IsEnabled = currentIndex > 0;
         _nextButton.IsVisible = currentIndex < visibleSteps.Count - 1;
+        _showCommandButton.IsVisible = currentIndex == visibleSteps.Count - 1;
         _createButton.IsVisible = currentIndex == visibleSteps.Count - 1;
 
         if (_currentStep == WizardStep.Review)
@@ -791,8 +987,9 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
 
     private void MoveNext()
     {
-        if (!TryValidateCurrentStep(out var error))
+        if (!TryValidateCurrentStep(out var error, out var firstInvalidControl))
         {
+            FocusValidationControl(firstInvalidControl);
             _errorText.Text = error;
             return;
         }
@@ -809,73 +1006,31 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
         UpdateWizardStepUi();
     }
 
-    private bool TryValidateCurrentStep(out string error)
+    private bool TryValidateCurrentStep(out string error, out Control? firstInvalidControl)
     {
         error = string.Empty;
+        firstInvalidControl = null;
 
         switch (_currentStep)
         {
             case WizardStep.CallSetup:
-                if (Normalize(_organisationBox.Text) is null)
-                {
-                    error = "An organisation is required.";
-                    return false;
-                }
-
-                var matchingOrganisation = FindSuggestion(_request.Organisations, _organisationBox.Text);
-                if (SelectedOrganisationLacksHotlineLicense(matchingOrganisation))
-                {
-                    error = "The selected organisation does not have an active Hotline license.";
-                    return false;
-                }
-
-                if (Normalize(_recipientNameBox.Text) is null)
-                {
-                    error = "A recipient name is required.";
-                    return false;
-                }
-
-                if (Normalize(_timezoneBox.Text) is null)
-                {
-                    error = "A recipient timezone is required.";
-                    return false;
-                }
-
-                if (IsPhoneModeSelected() && Normalize(_phoneNumberBox.Text) is null)
-                {
-                    error = "A phone number is required when call method is phone.";
-                    return false;
-                }
-
-                return true;
+                return TryValidateFields(GetCallSetupFields(), out error, out firstInvalidControl);
 
             case WizardStep.Template:
-                if (Normalize(_templateBox.Text) is null)
-                {
-                    error = "A template is required for template-based calls.";
-                    return false;
-                }
-
-                var templateIdText = Normalize(_templateVersionBox.Text);
-                if (templateIdText is not null && (!int.TryParse(templateIdText, out var parsedTemplateId) || parsedTemplateId <= 0))
-                {
-                    error = "Template version must be a positive integer.";
-                    return false;
-                }
-
-                return true;
+                return TryValidateFields(GetTemplateFields(), out error, out firstInvalidControl);
 
             case WizardStep.NotesQuestions:
-                return TryFlushPendingDrafts(out error);
+                return TryFlushPendingDrafts(out error, out firstInvalidControl);
 
             default:
                 return true;
         }
     }
 
-    private bool TryFlushPendingDrafts(out string error)
+    private bool TryFlushPendingDrafts(out string error, out Control? firstInvalidControl)
     {
         error = string.Empty;
+        firstInvalidControl = null;
 
         if (Normalize(_noteInputBox.Text) is { } pendingNote)
         {
@@ -888,7 +1043,7 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
             || Normalize(_questionFormatBox.Text) is not null
             || Normalize(_questionTextBox.Text) is not null)
         {
-            return TryAddQuestionFromEditor(out error);
+            return TryAddQuestionFromEditor(out error, out firstInvalidControl);
         }
 
         return true;
@@ -1002,42 +1157,36 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
 
     private void RefreshQuestionsList() => _questionsListBox.ItemsSource = _questions.ToArray();
 
-    private bool TryAddQuestionFromEditor(out string error)
+    private bool TryAddQuestionFromEditor(out string error, out Control? firstInvalidControl)
     {
         error = string.Empty;
+        firstInvalidControl = null;
 
-        var idText = Normalize(_questionIdBox.Text);
-        var format = Normalize(_questionFormatBox.Text);
-        var text = Normalize(_questionTextBox.Text);
-
-        if (idText is null && format is null && text is null)
+        if (!HasQuestionDraft())
         {
             error = "Enter a question before adding it.";
+            FocusValidationControl(_questionIdBox);
+            firstInvalidControl = _questionIdBox;
             return false;
         }
 
-        if (!int.TryParse(idText, out var id) || id <= 0)
+        if (!TryValidateFields(GetQuestionDraftFields(), out error, out firstInvalidControl))
         {
-            error = "Question ids must be positive integers.";
             return false;
         }
 
-        if (format is null || format is not "string" and not "boolean")
-        {
-            error = "Question format must be `string` or `boolean`.";
-            return false;
-        }
-
-        if (text is null)
-        {
-            error = "Question text is required.";
-            return false;
-        }
+        var idText = Normalize(_questionIdBox.Text)!;
+        var format = Normalize(_questionFormatBox.Text)!;
+        var text = Normalize(_questionTextBox.Text)!;
+        var id = int.Parse(idText);
 
         _questions.Add(new InteractiveCallCreateQuestion(id, text, format));
         _questionIdBox.Text = string.Empty;
         _questionFormatBox.Text = string.Empty;
         _questionTextBox.Text = string.Empty;
+        ClearValidationState(_questionIdValidation);
+        ClearValidationState(_questionFormatValidation);
+        ClearValidationState(_questionTextValidation);
         RefreshQuestionsList();
         return true;
     }
@@ -1047,45 +1196,44 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
         result = null;
         error = string.Empty;
 
-        if (!TryFlushPendingDrafts(out error))
+        if (!TryFlushPendingDrafts(out error, out var firstInvalidControl))
         {
+            FocusValidationControl(firstInvalidControl);
+            return false;
+        }
+
+        if (!TryValidateFields(GetCallSetupFields(), out error, out firstInvalidControl))
+        {
+            FocusValidationControl(firstInvalidControl);
+            return false;
+        }
+
+        if (!TryValidateFields(GetTemplateFields(), out error, out firstInvalidControl))
+        {
+            FocusValidationControl(firstInvalidControl);
+            return false;
+        }
+
+        if (!IsTemplateModeSelected() && !HasManualContent())
+        {
+            error = "Manual calls require instructions, agenda, or at least one question.";
             return false;
         }
 
         var templateIdText = Normalize(_templateVersionBox.Text);
-        int? templateId = null;
-        if (templateIdText is not null)
-        {
-            if (!int.TryParse(templateIdText, out var parsedTemplateId) || parsedTemplateId <= 0)
-            {
-                error = "Template version must be a positive integer.";
-                return false;
-            }
-
-            templateId = parsedTemplateId;
-        }
-
-        var organizationReference = Normalize(_organisationBox.Text);
-        if (organizationReference is null)
-        {
-            error = "An organisation is required.";
-            return false;
-        }
-
-        var matchingOrganisation = FindSuggestion(_request.Organisations, organizationReference);
-        if (SelectedOrganisationLacksHotlineLicense(matchingOrganisation))
-        {
-            error = "The selected organisation does not have an active Hotline license.";
-            return false;
-        }
+        int? templateId = templateIdText is null ? null : int.Parse(templateIdText);
+        var organizationReference = Normalize(_organisationBox.Text)!;
+        var recipientTimezone = Normalize(_timezoneBox.Text)!;
+        var phoneNumber = IsPhoneModeSelected() ? Normalize(_phoneNumberBox.Text) : null;
 
         result = new InteractiveCallCreateResult(
             false,
+            false,
             organizationReference,
             IsPhoneModeSelected() ? "phone" : "web",
-            IsPhoneModeSelected() ? Normalize(_phoneNumberBox.Text) : null,
+            phoneNumber,
             Normalize(_recipientNameBox.Text),
-            Normalize(_timezoneBox.Text),
+            recipientTimezone,
             IsTemplateModeSelected() ? Normalize(_templateBox.Text) : null,
             IsTemplateModeSelected() ? templateId : null,
             IsManualModeSelected() ? Normalize(_instructionsBox.Text) : null,
@@ -1093,6 +1241,250 @@ internal sealed class CallCreateWizardWindow : InteractiveDialogWindow<Interacti
             _notes.ToArray(),
             _questions.ToArray());
         return true;
+    }
+
+    private string? ValidateOrganisationField()
+    {
+        if (Normalize(_organisationBox.Text) is null)
+        {
+            return "An organisation is required.";
+        }
+
+        var matchingOrganisation = FindSuggestion(_request.Organisations, _organisationBox.Text);
+        return SelectedOrganisationLacksHotlineLicense(matchingOrganisation)
+            ? "The selected organisation does not have an active Hotline license."
+            : null;
+    }
+
+    private string? ValidateRecipientNameField() =>
+        Normalize(_recipientNameBox.Text) is null
+            ? "A recipient name is required."
+            : null;
+
+    private string? ValidateRecipientTimezoneField()
+    {
+        if (Normalize(_timezoneBox.Text) is null)
+        {
+            return "A recipient timezone is required.";
+        }
+
+        return ApiFieldValidator.ValidateIanaTimezone(_timezoneBox.Text);
+    }
+
+    private string? ValidatePhoneNumberField()
+    {
+        if (!IsPhoneModeSelected())
+        {
+            return null;
+        }
+
+        if (Normalize(_phoneNumberBox.Text) is null)
+        {
+            return "A phone number is required when call method is phone.";
+        }
+
+        return ApiFieldValidator.ValidateInternationalPhoneNumber(_phoneNumberBox.Text);
+    }
+
+    private string? ValidateTemplateField()
+    {
+        if (!IsTemplateModeSelected())
+        {
+            return null;
+        }
+
+        return Normalize(_templateBox.Text) is null
+            ? "A template is required for template-based calls."
+            : null;
+    }
+
+    private string? ValidateTemplateVersionField()
+    {
+        if (!IsTemplateModeSelected())
+        {
+            return null;
+        }
+
+        var templateIdText = Normalize(_templateVersionBox.Text);
+        if (templateIdText is null)
+        {
+            return null;
+        }
+
+        return !int.TryParse(templateIdText, out var parsedTemplateId) || parsedTemplateId <= 0
+            ? "Template version must be a positive integer."
+            : null;
+    }
+
+    private string? ValidateQuestionIdField()
+    {
+        if (!HasQuestionDraft())
+        {
+            return null;
+        }
+
+        var idText = Normalize(_questionIdBox.Text);
+        return !int.TryParse(idText, out var id) || id <= 0
+            ? "Question ids must be positive integers."
+            : null;
+    }
+
+    private string? ValidateQuestionFormatField()
+    {
+        if (!HasQuestionDraft())
+        {
+            return null;
+        }
+
+        var format = Normalize(_questionFormatBox.Text);
+        return format is null || format is not "string" and not "boolean"
+            ? "Question format must be `string` or `boolean`."
+            : null;
+    }
+
+    private string? ValidateQuestionTextField()
+    {
+        if (!HasQuestionDraft())
+        {
+            return null;
+        }
+
+        return Normalize(_questionTextBox.Text) is null
+            ? "Question text is required."
+            : null;
+    }
+
+    private void RegisterValidatedField(ValidatedFieldState field)
+    {
+        field.Control.AddHandler(InputElement.LostFocusEvent, (_, _) => ValidateFieldOnBlur(field), RoutingStrategies.Bubble);
+
+        switch (field.Control)
+        {
+            case TextBox textBox:
+                textBox.TextChanged += (_, _) => HandleFieldTextChanged(field);
+                break;
+
+            case AutoCompleteBox autoCompleteBox:
+                autoCompleteBox.TextChanged += (_, _) => HandleFieldTextChanged(field);
+                break;
+        }
+    }
+
+    private void ValidateFieldOnBlur(ValidatedFieldState field) =>
+        UpdateFieldValidationState(field, field.Validator());
+
+    private void HandleFieldTextChanged(ValidatedFieldState field)
+    {
+        var error = field.Validator();
+        if (error is null || field.Control.Classes.Contains("invalid"))
+        {
+            UpdateFieldValidationState(field, error);
+        }
+    }
+
+    private bool TryValidateFields(
+        IReadOnlyList<ValidatedFieldState> fields,
+        out string error,
+        out Control? firstInvalidControl)
+    {
+        error = string.Empty;
+        firstInvalidControl = null;
+
+        foreach (var field in fields)
+        {
+            var fieldError = field.Validator();
+            UpdateFieldValidationState(field, fieldError);
+            if (fieldError is null)
+            {
+                continue;
+            }
+
+            error = string.IsNullOrEmpty(error) ? fieldError : error;
+            firstInvalidControl ??= field.Control;
+        }
+
+        return firstInvalidControl is null;
+    }
+
+    private void UpdateFieldValidationState(ValidatedFieldState field, string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            ClearValidationState(field);
+            return;
+        }
+
+        if (!field.Control.Classes.Contains("invalid"))
+        {
+            field.Control.Classes.Add("invalid");
+        }
+
+        if (!field.Border.Classes.Contains("invalid-field"))
+        {
+            field.Border.Classes.Add("invalid-field");
+        }
+
+        field.ErrorText.Text = error;
+        field.ErrorText.IsVisible = true;
+    }
+
+    private static void ClearValidationState(ValidatedFieldState field)
+    {
+        field.Control.Classes.Remove("invalid");
+        field.Border.Classes.Remove("invalid-field");
+        field.ErrorText.Text = string.Empty;
+        field.ErrorText.IsVisible = false;
+    }
+
+    private IReadOnlyList<ValidatedFieldState> GetCallSetupFields() =>
+        IsPhoneModeSelected()
+            ? [_organisationValidation, _recipientNameValidation, _timezoneValidation, _phoneNumberValidation]
+            : [_organisationValidation, _recipientNameValidation, _timezoneValidation];
+
+    private IReadOnlyList<ValidatedFieldState> GetTemplateFields() =>
+        IsTemplateModeSelected()
+            ? [_templateValidation, _templateVersionValidation]
+            : [];
+
+    private IReadOnlyList<ValidatedFieldState> GetQuestionDraftFields() =>
+        [_questionIdValidation, _questionFormatValidation, _questionTextValidation];
+
+    private bool HasQuestionDraft() =>
+        Normalize(_questionIdBox.Text) is not null
+        || Normalize(_questionFormatBox.Text) is not null
+        || Normalize(_questionTextBox.Text) is not null;
+
+    private bool HasManualContent() =>
+        Normalize(_instructionsBox.Text) is not null
+        || Normalize(_agendaBox.Text) is not null
+        || _questions.Count > 0;
+
+    private void ClearInactiveValidationStates()
+    {
+        if (!IsPhoneModeSelected())
+        {
+            ClearValidationState(_phoneNumberValidation);
+        }
+
+        if (!IsTemplateModeSelected())
+        {
+            ClearValidationState(_templateValidation);
+            ClearValidationState(_templateVersionValidation);
+        }
+    }
+
+    private void FocusValidationControl(Control? control)
+    {
+        if (control is null)
+        {
+            return;
+        }
+
+        _lastValidationFocusTarget = control;
+        if (control is InputElement inputElement)
+        {
+            inputElement.Focus(NavigationMethod.Unspecified, KeyModifiers.None);
+        }
     }
 
     private bool IsTemplateModeSelected() =>

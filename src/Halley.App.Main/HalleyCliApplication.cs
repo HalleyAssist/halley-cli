@@ -79,6 +79,8 @@ public sealed class HalleyCliApplication
     private readonly ITextFileEditor _textFileEditor;
     private readonly IAsyncClock _clock;
     private readonly IHalleyLoggerFactory _loggerFactory;
+    private readonly Func<string> _replayCommandNameProvider;
+    private readonly Func<bool> _isWindowsProvider;
     private readonly HalleyOutputFormatter _formatter = new();
     private readonly AsyncLocal<ILogger?> _currentLogger = new();
     private readonly Option<string> _outputOption;
@@ -95,7 +97,9 @@ public sealed class HalleyCliApplication
         IInteractiveUi? interactiveUi = null,
         ITextFileEditor? textFileEditor = null,
         IAsyncClock? clock = null,
-        IHalleyLoggerFactory? loggerFactory = null)
+        IHalleyLoggerFactory? loggerFactory = null,
+        Func<string>? replayCommandNameProvider = null,
+        Func<bool>? isWindowsProvider = null)
     {
         _apiClientFactory = apiClientFactory;
         _sessionStore = sessionStore;
@@ -105,6 +109,8 @@ public sealed class HalleyCliApplication
         _textFileEditor = textFileEditor ?? new SystemTextFileEditor();
         _clock = clock ?? new SystemAsyncClock();
         _loggerFactory = loggerFactory ?? new SerilogLoggerFactory();
+        _replayCommandNameProvider = replayCommandNameProvider ?? DefaultReplayCommandNameProvider;
+        _isWindowsProvider = isWindowsProvider ?? OperatingSystem.IsWindows;
         _outputOption = CreateOutputOption();
         _tokenOption = CreateOption<string?>("--token", "JWT token to use instead of the saved session token.");
         _tokenOption.Recursive = true;
@@ -396,6 +402,11 @@ public sealed class HalleyCliApplication
                 return await WriteCliErrorAsync(input.ErrorMessage, outputMode, cancellationToken);
             }
 
+            if (input.ShouldReturnCommandOnly)
+            {
+                return await WriteSuccessAsync(BuildCallCommandOutput(parseResult, input.Input!), outputMode, cancellationToken);
+            }
+
             var createResult = await apiClient.Value!.CreateCallRequestAsync(token, BuildCallRequest(input.Input!), cancellationToken);
             var shouldWait = parseResult.GetValue(executionOptions.WaitOption);
             var shouldDelete = parseResult.GetValue(executionOptions.DeleteOption);
@@ -607,9 +618,9 @@ public sealed class HalleyCliApplication
         var organisationOption = CreateOption<string?>("--organisation", "The organisation id or exact name for the call request.");
         organisationOption.Aliases.Add("--organisation-id");
         var callMethodOption = CreateOption<string?>("--call-method", "How the call should be delivered: `phone` or `web`.");
-        var phoneNumberOption = CreateOption<string?>("--phone-number", "The phone number to call when using `phone`.");
+        var phoneNumberOption = CreateOption<string?>("--phone-number", "The international phone number to call when using `phone`, for example `+61400000000`.");
         var recipientNameOption = CreateOption<string?>("--recipient-name", "The recipient's name.");
-        var recipientTimezoneOption = CreateOption<string?>("--recipient-timezone", "The recipient's IANA timezone, for example `Australia/Melbourne`.");
+        var recipientTimezoneOption = CreateOption<string?>("--recipient-timezone", "The recipient's valid IANA timezone, for example `Australia/Melbourne`.");
         var templateUuidOption = CreateOption<string?>("--template-uuid", "The call template uuid to inherit from.");
         var templateIdOption = CreateOption<int?>("--template-id", "Optional specific call template version id.");
         var instructionsOption = CreateOption<string?>("--instructions", "Inline instructions for the call.");
@@ -1206,7 +1217,7 @@ public sealed class HalleyCliApplication
         var contactIdOption = CreateOption<int?>("--contact-id", "Use an existing contact id.");
         var contactNameOption = CreateOption<string?>("--contact-name", "Create or update the user's contact name.");
         var contactEmailOption = CreateOption<string?>("--contact-email", "Create or update the user's contact email.");
-        var contactPhoneOption = CreateOption<string?>("--contact-phone", "Optional contact phone number.");
+        var contactPhoneOption = CreateOption<string?>("--contact-phone", "Optional contact phone number. Use an international number, or pair a national-format number with `--country`.");
 
         return new UserWriteOptions(
             nameOption,
@@ -1271,6 +1282,13 @@ public sealed class HalleyCliApplication
         if (usesNestedContact && (string.IsNullOrWhiteSpace(contactName) || string.IsNullOrWhiteSpace(contactEmail)))
         {
             error = "When using nested contact fields, both --contact-name and --contact-email are required.";
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(contactPhone)
+            && ApiFieldValidator.ValidateContactPhoneNumber(contactPhone, country) is { } contactPhoneError)
+        {
+            error = $"Invalid --contact-phone value. {contactPhoneError}";
             return false;
         }
 
@@ -1362,7 +1380,7 @@ public sealed class HalleyCliApplication
             return validatedInput;
         }
 
-        return CallCreateInputResolution.Success(validatedInput.Input, wasPromptedInteractively);
+        return CallCreateInputResolution.Success(validatedInput.Input, wasPromptedInteractively, candidate.ShouldReturnCommandOnly);
     }
 
     private static bool HasCallCreateInput(ParseResult parseResult, CallCreateOptions options) =>
@@ -1513,7 +1531,12 @@ public sealed class HalleyCliApplication
         string? phoneNumber = null;
         if (callMethod == "phone")
         {
-            phoneNumber = await PromptForRequiredLineAsync("Phone number: ", cancellationToken, PhoneNumberSuggestions, "Enter an E.164-style number if possible.");
+            phoneNumber = await PromptForRequiredLineAsync(
+                "Phone number: ",
+                cancellationToken,
+                PhoneNumberSuggestions,
+                "Enter a valid international phone number such as `+61400000000`.",
+                ApiFieldValidator.ValidateInternationalPhoneNumber);
             if (phoneNumber is null)
             {
                 return CallCreateCandidateResolution.Error("Interactive call creation was cancelled.");
@@ -1526,7 +1549,12 @@ public sealed class HalleyCliApplication
             return CallCreateCandidateResolution.Error("Interactive call creation was cancelled.");
         }
 
-        var recipientTimezone = await PromptForRequiredLineAsync("Recipient timezone: ", cancellationToken, GetTimezoneSuggestions(), "Use an IANA timezone such as `Australia/Melbourne`.");
+        var recipientTimezone = await PromptForRequiredLineAsync(
+            "Recipient timezone: ",
+            cancellationToken,
+            GetTimezoneSuggestions(),
+            "Use a valid IANA timezone such as `Australia/Melbourne`.",
+            ApiFieldValidator.ValidateIanaTimezone);
         if (recipientTimezone is null)
         {
             return CallCreateCandidateResolution.Error("Interactive call creation was cancelled.");
@@ -1703,7 +1731,7 @@ public sealed class HalleyCliApplication
             result.Instructions,
             result.Agenda,
             result.Notes,
-            result.Questions.Select(question => new CallQuestionInput(question.Id, question.Text, question.Format)).ToArray()));
+            result.Questions.Select(question => new CallQuestionInput(question.Id, question.Text, question.Format)).ToArray()), result.ShowCommand);
     }
 
     private async Task<CallNotesResolution> PromptForNotesAsync(CancellationToken cancellationToken)
@@ -1803,6 +1831,11 @@ public sealed class HalleyCliApplication
             return CallCreateInputResolution.Error("A --recipient-timezone value is required.");
         }
 
+        if (ApiFieldValidator.ValidateIanaTimezone(recipientTimezone) is { } timezoneError)
+        {
+            return CallCreateInputResolution.Error($"Invalid --recipient-timezone value. {timezoneError}");
+        }
+
         var phoneNumber = NormalizeOptionalText(candidate.PhoneNumber);
         if (callMethod == "phone" && string.IsNullOrWhiteSpace(phoneNumber))
         {
@@ -1812,6 +1845,11 @@ public sealed class HalleyCliApplication
         if (callMethod == "web" && !string.IsNullOrWhiteSpace(phoneNumber))
         {
             return CallCreateInputResolution.Error("`--phone-number` cannot be used when `--call-method web` is selected.");
+        }
+
+        if (callMethod == "phone" && ApiFieldValidator.ValidateInternationalPhoneNumber(phoneNumber) is { } phoneNumberError)
+        {
+            return CallCreateInputResolution.Error($"Invalid --phone-number value. {phoneNumberError}");
         }
 
         var instructions = NormalizeOptionalText(candidate.Instructions);
@@ -2244,11 +2282,19 @@ public sealed class HalleyCliApplication
         await _stderr.WriteLineAsync($"To make this call again execute: {command}".AsMemory(), cancellationToken);
     }
 
+    private CommandOutput BuildCallCommandOutput(ParseResult parseResult, CallCreateInput input)
+    {
+        var command = BuildCallReplayCommand(parseResult, input);
+        return CommandOutput.Json(
+            new JsonObject { ["command"] = command },
+            JsonValue.Create(command)!);
+    }
+
     private string BuildCallReplayCommand(ParseResult parseResult, CallCreateInput input)
     {
         var arguments = new List<string>
         {
-            "halley-cli",
+            GetReplayCommandName(),
             "calls",
             "create",
             "--organisation-id",
@@ -2314,10 +2360,21 @@ public sealed class HalleyCliApplication
             arguments.Add(endpoint!);
         }
 
-        return string.Join(" ", arguments.Select(FormatShellArgument));
+        return string.Join(" ", arguments.Select(FormatReplayCommandArgument));
     }
 
-    private static string FormatShellArgument(string value)
+    private string GetReplayCommandName()
+    {
+        var commandName = NormalizeOptionalText(_replayCommandNameProvider());
+        return string.IsNullOrWhiteSpace(commandName) ? "halley-cli" : commandName;
+    }
+
+    private string FormatReplayCommandArgument(string value) =>
+        _isWindowsProvider()
+            ? FormatWindowsCommandArgument(value)
+            : FormatPosixShellArgument(value);
+
+    private static string FormatPosixShellArgument(string value)
     {
         if (string.IsNullOrEmpty(value))
         {
@@ -2334,9 +2391,63 @@ public sealed class HalleyCliApplication
             : "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
     }
 
+    private static string FormatWindowsCommandArgument(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return "\"\"";
+        }
+
+        if (value.All(IsWindowsCommandSafeCharacter))
+        {
+            return value;
+        }
+
+        var builder = new StringBuilder();
+        builder.Append('"');
+        var trailingBackslashCount = 0;
+
+        foreach (var ch in value)
+        {
+            if (ch == '\\')
+            {
+                trailingBackslashCount++;
+                continue;
+            }
+
+            if (ch == '"')
+            {
+                builder.Append('\\', trailingBackslashCount * 2 + 1);
+                builder.Append('"');
+                trailingBackslashCount = 0;
+                continue;
+            }
+
+            if (trailingBackslashCount > 0)
+            {
+                builder.Append('\\', trailingBackslashCount);
+                trailingBackslashCount = 0;
+            }
+
+            builder.Append(ch);
+        }
+
+        if (trailingBackslashCount > 0)
+        {
+            builder.Append('\\', trailingBackslashCount * 2);
+        }
+
+        builder.Append('"');
+        return builder.ToString();
+    }
+
     private static bool IsShellSafeCharacter(char ch) =>
         char.IsAsciiLetterOrDigit(ch)
         || ch is '-' or '_' or '.' or '/' or ':' or '+' or '=' or '@' or ',';
+
+    private static bool IsWindowsCommandSafeCharacter(char ch) =>
+        char.IsAsciiLetterOrDigit(ch)
+        || ch is '-' or '_' or '.' or '/' or '\\' or ':' or '+' or '=' or '@' or ',';
 
     private static string EscapeAnsiCString(string value)
     {
@@ -2355,6 +2466,21 @@ public sealed class HalleyCliApplication
         }
 
         return builder.ToString();
+    }
+
+    private static string DefaultReplayCommandNameProvider()
+    {
+        var processPath = Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(processPath))
+        {
+            var fileName = Path.GetFileName(processPath);
+            if (!string.IsNullOrWhiteSpace(fileName))
+            {
+                return fileName;
+            }
+        }
+
+        return "halley-cli";
     }
 
     private CallWaitConfigurationResolution GetCallWaitConfiguration(ParseResult parseResult, CallExecutionOptions options)
@@ -2613,7 +2739,8 @@ public sealed class HalleyCliApplication
         string prompt,
         CancellationToken cancellationToken,
         IReadOnlyList<InteractiveSuggestion>? suggestions = null,
-        string? helpText = null)
+        string? helpText = null,
+        Func<string, string?>? validator = null)
     {
         while (true)
         {
@@ -2626,6 +2753,12 @@ public sealed class HalleyCliApplication
             value = NormalizeOptionalText(value);
             if (!string.IsNullOrWhiteSpace(value))
             {
+                if (validator is not null && validator(value) is { } validationError)
+                {
+                    await _stderr.WriteLineAsync(validationError.AsMemory(), cancellationToken);
+                    continue;
+                }
+
                 return value;
             }
 
@@ -3254,22 +3387,22 @@ public sealed class HalleyCliApplication
 
     private sealed record CallQuestionInput(int Id, string Text, string Format);
 
-    private sealed record CallCreateCandidateResolution(CallCreateCandidate? Candidate, string? ErrorMessage, ApiCallResult? ErrorResult)
+    private sealed record CallCreateCandidateResolution(CallCreateCandidate? Candidate, string? ErrorMessage, ApiCallResult? ErrorResult, bool ShouldReturnCommandOnly)
     {
-        public static CallCreateCandidateResolution Success(CallCreateCandidate candidate) => new(candidate, null, null);
+        public static CallCreateCandidateResolution Success(CallCreateCandidate candidate, bool shouldReturnCommandOnly = false) => new(candidate, null, null, shouldReturnCommandOnly);
 
-        public static CallCreateCandidateResolution Error(string errorMessage) => new(null, errorMessage, null);
+        public static CallCreateCandidateResolution Error(string errorMessage) => new(null, errorMessage, null, false);
 
-        public static CallCreateCandidateResolution ApiError(ApiCallResult errorResult) => new(null, null, errorResult);
+        public static CallCreateCandidateResolution ApiError(ApiCallResult errorResult) => new(null, null, errorResult, false);
     }
 
-    private sealed record CallCreateInputResolution(CallCreateInput? Input, string? ErrorMessage, ApiCallResult? ErrorResult, bool ShouldWriteReplayHint)
+    private sealed record CallCreateInputResolution(CallCreateInput? Input, string? ErrorMessage, ApiCallResult? ErrorResult, bool ShouldWriteReplayHint, bool ShouldReturnCommandOnly)
     {
-        public static CallCreateInputResolution Success(CallCreateInput input, bool shouldWriteReplayHint = false) => new(input, null, null, shouldWriteReplayHint);
+        public static CallCreateInputResolution Success(CallCreateInput input, bool shouldWriteReplayHint = false, bool shouldReturnCommandOnly = false) => new(input, null, null, shouldWriteReplayHint, shouldReturnCommandOnly);
 
-        public static CallCreateInputResolution Error(string errorMessage) => new(null, errorMessage, null, false);
+        public static CallCreateInputResolution Error(string errorMessage) => new(null, errorMessage, null, false, false);
 
-        public static CallCreateInputResolution ApiError(ApiCallResult errorResult) => new(null, null, errorResult, false);
+        public static CallCreateInputResolution ApiError(ApiCallResult errorResult) => new(null, null, errorResult, false, false);
     }
 
     private sealed record CallNotesResolution(IReadOnlyList<string> Notes, string? ErrorMessage)

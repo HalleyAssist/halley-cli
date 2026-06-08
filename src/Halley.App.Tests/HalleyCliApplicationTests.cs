@@ -3,6 +3,9 @@ using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
 using System.Text.Json.Nodes;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Headless;
 using Avalonia.Input;
 using Halley.App.Api;
 using Halley.App.Main;
@@ -11,6 +14,15 @@ namespace Halley.App.Tests;
 
 public sealed class HalleyCliApplicationTests
 {
+    private static readonly Lock HeadlessLock = new();
+    private static Thread? _headlessThread;
+    private static AutoResetEvent? _headlessInitializedEvent;
+    private static AutoResetEvent? _headlessWorkAvailableEvent;
+    private static AutoResetEvent? _headlessWorkCompletedEvent;
+    private static Action? _pendingHeadlessAction;
+    private static Exception? _pendingHeadlessException;
+    private static bool _headlessInitialized;
+
     [Fact]
     public async Task LoginUserSavesSessionAndPrintsHumanToken()
     {
@@ -476,6 +488,27 @@ public sealed class HalleyCliApplicationTests
     }
 
     [Fact]
+    public async Task UsersCreateRejectsInvalidContactPhone()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
+
+        var exitCode = await harness.RunAsync(
+            "users",
+            "create",
+            "--name", "alice",
+            "--password", "pw123",
+            "--country", "AU",
+            "--contact-name", "Alice Example",
+            "--contact-email", "alice@example.test",
+            "--contact-phone", "not-a-phone",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Invalid --contact-phone value. Expected a valid phone number. Use an international number such as `+61400000000`, or a national-format number that matches the supplied country.", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
     public async Task UsersUpdateDefaultsNameToTargetWhenNewNameIsOmitted()
     {
         using var harness = new TestHarness((request, body) =>
@@ -495,6 +528,47 @@ public sealed class HalleyCliApplicationTests
             "--token", "inline-token");
 
         Assert.Equal(0, exitCode);
+    }
+
+    [Fact]
+    public async Task UsersUpdateRejectsInvalidContactPhone()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
+
+        var exitCode = await harness.RunAsync(
+            "users",
+            "update",
+            "alice",
+            "--password", "pw123",
+            "--country", "AU",
+            "--contact-name", "Alice Example",
+            "--contact-email", "alice@example.test",
+            "--contact-phone", "not-a-phone",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Invalid --contact-phone value. Expected a valid phone number. Use an international number such as `+61400000000`, or a national-format number that matches the supplied country.", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task UsersUpdateRejectsNationalContactPhoneWithoutCountry()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
+
+        var exitCode = await harness.RunAsync(
+            "users",
+            "update",
+            "alice",
+            "--password", "pw123",
+            "--contact-name", "Alice Example",
+            "--contact-email", "alice@example.test",
+            "--contact-phone", "0400000000",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Invalid --contact-phone value. Use an international phone number such as `+61400000000`, or supply `--country` when using a national-format number.", harness.StderrText);
+        Assert.Empty(harness.Requests);
     }
 
     [Fact]
@@ -715,6 +789,50 @@ public sealed class HalleyCliApplicationTests
     }
 
     [Fact]
+    public async Task CallsCreateInteractivePromptReasksForInvalidPhoneAndTimezone()
+    {
+        var interactivePrompter = new StubInteractiveUi(
+            isInteractive: true,
+            lineResponses:
+            [
+                "manual",
+                "Acme Care",
+                "phone",
+                "0400000000",
+                "+61400000000",
+                "Test User",
+                "Eastern Standard Time",
+                "Australia/Melbourne",
+                "n",
+                "n"
+            ],
+            multilineResponses:
+            [
+                "Please check in",
+                string.Empty
+            ]);
+
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations" when request.RequestUri!.Query.Contains("size=200", StringComparison.Ordinal) => OrganisationsListResponse((50, "Acme Care", true)),
+                "/api/v1/organisations" => OrganisationsListResponse((50, "Acme Care", true)),
+                "/api/v1/call_requests" => CreateInteractiveCallResponse(body!),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        }, interactiveUi: interactivePrompter);
+
+        var exitCode = await harness.RunAsync("calls", "create", "--token", "inline-token");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(2, interactivePrompter.PromptRequests.Count(request => request.Prompt == "Phone number: "));
+        Assert.Equal(2, interactivePrompter.PromptRequests.Count(request => request.Prompt == "Recipient timezone: "));
+        Assert.Contains("Expected a valid international phone number such as `+61400000000`.", harness.StderrText);
+        Assert.Contains("Expected a valid IANA timezone such as `Australia/Melbourne`.", harness.StderrText);
+    }
+
+    [Fact]
     public async Task CallsCreateFailsFastWhenOrganisationSuggestionsCannotBeLoaded()
     {
         var interactivePrompter = new StubInteractiveUi(
@@ -764,6 +882,7 @@ public sealed class HalleyCliApplicationTests
             isInteractive: true,
             supportsCallCreateWizard: true,
             callCreateWizardResult: new InteractiveCallCreateResult(
+                false,
                 false,
                 "Acme Care",
                 "web",
@@ -816,6 +935,7 @@ public sealed class HalleyCliApplicationTests
             supportsCallCreateWizard: true,
             callCreateWizardResult: new InteractiveCallCreateResult(
                 false,
+                false,
                 "Acme Care",
                 "web",
                 null,
@@ -867,12 +987,91 @@ public sealed class HalleyCliApplicationTests
     }
 
     [Fact]
+    public async Task CallsCreateWizardCanReturnTheCreateCommandWithoutCreatingTheCall()
+    {
+        var interactiveUi = new StubInteractiveUi(
+            isInteractive: true,
+            supportsCallCreateWizard: true,
+            callCreateWizardResult: new InteractiveCallCreateResult(
+                false,
+                true,
+                "Acme Care",
+                "web",
+                null,
+                "Test User",
+                "Australia/Melbourne",
+                null,
+                null,
+                "Please check in",
+                "Say hello",
+                [],
+                []));
+
+        using var harness = new TestHarness((request, _) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations" => OrganisationsListResponse((50, "Acme Care", true)),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        }, interactiveUi: interactiveUi);
+
+        var exitCode = await harness.RunAsync("calls", "create", "--token", "inline-token");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("halley-cli calls create --organisation-id 50 --call-method web --recipient-name 'Test User' --recipient-timezone Australia/Melbourne --instructions 'Please check in' --agenda 'Say hello'", harness.StdoutText.Trim());
+        Assert.DoesNotContain("To make this call again execute:", harness.StderrText);
+        Assert.DoesNotContain(harness.Requests, request => request.Uri.Contains("/api/v1/call_requests", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CallsCreateWizardReturnsWindowsCompatibleReplayCommandUsingExecutableName()
+    {
+        var interactiveUi = new StubInteractiveUi(
+            isInteractive: true,
+            supportsCallCreateWizard: true,
+            callCreateWizardResult: new InteractiveCallCreateResult(
+                false,
+                true,
+                "Acme Care",
+                "phone",
+                "+61437635615",
+                "Mathew Heard",
+                "Australia/Melbourne",
+                null,
+                null,
+                "You are collecting feedback on performance for an aged care home MatHealth",
+                "Collect answers for all questions and then hang up the call",
+                [],
+                [new InteractiveCallCreateQuestion(1, "How do you feel about cake for lunch?", "string")]));
+
+        using var harness = new TestHarness(
+            (request, _) => request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations" => OrganisationsListResponse((50, "Acme Care", true)),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            },
+            interactiveUi: interactiveUi,
+            replayCommandName: "Halley.App.Cli.exe",
+            isWindows: true);
+
+        var exitCode = await harness.RunAsync("calls", "create", "--token", "inline-token", "--endpoint", "https://cloud.dev.halleyassist.com");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(
+            "Halley.App.Cli.exe calls create --organisation-id 50 --call-method phone --recipient-name \"Mathew Heard\" --recipient-timezone Australia/Melbourne --phone-number +61437635615 --instructions \"You are collecting feedback on performance for an aged care home MatHealth\" --agenda \"Collect answers for all questions and then hang up the call\" --question \"1:string:How do you feel about cake for lunch?\" --endpoint https://cloud.dev.halleyassist.com",
+            harness.StdoutText.Trim());
+        Assert.DoesNotContain("'", harness.StdoutText);
+    }
+
+    [Fact]
     public async Task CallsCreateWizardRejectsOrganisationWithoutHotlineLicense()
     {
         var interactiveUi = new StubInteractiveUi(
             isInteractive: true,
             supportsCallCreateWizard: true,
             callCreateWizardResult: new InteractiveCallCreateResult(
+                false,
                 false,
                 "No License Org",
                 "web",
@@ -900,6 +1099,129 @@ public sealed class HalleyCliApplicationTests
         Assert.Equal(1, exitCode);
         Assert.Contains("does not have an active Hotline license", harness.StderrText);
         Assert.DoesNotContain(harness.Requests, request => request.Uri.Contains("/api/v1/call_requests", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CallCreateWizardTimezoneFieldTurnsRedOnBlurAndClearsWhenCorrected()
+    {
+        RunOnAvaloniaThread(() =>
+        {
+            var window = CreateCallCreateWizardWindow();
+            var timezoneBox = GetPrivateField<AutoCompleteBox>(window, "_timezoneBox");
+            var validationState = GetPrivateField(window, "_timezoneValidation");
+
+            timezoneBox.Text = "Eastern Standard Time";
+            InvokePrivateMethod(window, "ValidateFieldOnBlur", validationState);
+
+            Assert.Contains("invalid", timezoneBox.Classes);
+            var errorText = GetValidatedFieldErrorText(validationState);
+            Assert.True(errorText.IsVisible);
+            Assert.Equal("Expected a valid IANA timezone such as `Australia/Melbourne`.", errorText.Text);
+
+            timezoneBox.Text = "Australia/Melbourne";
+            InvokePrivateMethod(window, "HandleFieldTextChanged", validationState);
+
+            Assert.DoesNotContain("invalid", timezoneBox.Classes);
+            Assert.False(errorText.IsVisible);
+            Assert.Equal(string.Empty, errorText.Text);
+        });
+    }
+
+    [Fact]
+    public void CallCreateWizardPhoneFieldTurnsRedAndClearsWhenSwitchingToWebMode()
+    {
+        RunOnAvaloniaThread(() =>
+        {
+            var window = CreateCallCreateWizardWindow();
+            var phoneNumberBox = GetPrivateField<TextBox>(window, "_phoneNumberBox");
+            var validationState = GetPrivateField(window, "_phoneNumberValidation");
+            var webMethodButton = GetPrivateField<RadioButton>(window, "_webMethodButton");
+
+            phoneNumberBox.Text = "0400000000";
+            InvokePrivateMethod(window, "ValidateFieldOnBlur", validationState);
+
+            Assert.Contains("invalid", phoneNumberBox.Classes);
+
+            webMethodButton.IsChecked = true;
+            InvokePrivateMethod(window, "UpdateVisibility");
+
+            Assert.DoesNotContain("invalid", phoneNumberBox.Classes);
+            Assert.False(GetValidatedFieldErrorText(validationState).IsVisible);
+        });
+    }
+
+    [Fact]
+    public void CallCreateWizardTemplateVersionTurnsRedWhenInvalidAndClearsWhenTemplateModeIsDisabled()
+    {
+        RunOnAvaloniaThread(() =>
+        {
+            var window = CreateCallCreateWizardWindow();
+            var templateModeButton = GetPrivateField<RadioButton>(window, "_templateModeButton");
+            var manualModeButton = GetPrivateField<RadioButton>(window, "_manualModeButton");
+            var templateVersionBox = GetPrivateField<AutoCompleteBox>(window, "_templateVersionBox");
+            var validationState = GetPrivateField(window, "_templateVersionValidation");
+
+            templateModeButton.IsChecked = true;
+            InvokePrivateMethod(window, "UpdateVisibility");
+
+            templateVersionBox.Text = "zero";
+            InvokePrivateMethod(window, "ValidateFieldOnBlur", validationState);
+
+            Assert.Contains("invalid", templateVersionBox.Classes);
+            Assert.Equal("Template version must be a positive integer.", GetValidatedFieldErrorText(validationState).Text);
+
+            manualModeButton.IsChecked = true;
+            InvokePrivateMethod(window, "UpdateVisibility");
+
+            Assert.DoesNotContain("invalid", templateVersionBox.Classes);
+            Assert.False(GetValidatedFieldErrorText(validationState).IsVisible);
+        });
+    }
+
+    [Fact]
+    public void CallCreateWizardQuestionDraftMarksInvalidFieldsOnStepSubmit()
+    {
+        RunOnAvaloniaThread(() =>
+        {
+            var window = CreateCallCreateWizardWindow();
+            var questionIdBox = GetPrivateField<TextBox>(window, "_questionIdBox");
+            var questionFormatBox = GetPrivateField<AutoCompleteBox>(window, "_questionFormatBox");
+            var questionTextBox = GetPrivateField<TextBox>(window, "_questionTextBox");
+
+            SetWizardStep(window, "NotesQuestions");
+            questionFormatBox.Text = "boolean";
+            questionTextBox.Text = "Was the resident okay?";
+
+            InvokePrivateMethod(window, "MoveNext");
+
+            Assert.Contains("invalid", questionIdBox.Classes);
+            Assert.DoesNotContain("invalid", questionFormatBox.Classes);
+            Assert.DoesNotContain("invalid", questionTextBox.Classes);
+            Assert.Equal("Question ids must be positive integers.", GetPrivateField<TextBlock>(window, "_errorText").Text);
+            Assert.Same(questionIdBox, GetPrivateField<Control>(window, "_lastValidationFocusTarget"));
+        });
+    }
+
+    [Fact]
+    public void CallCreateWizardMoveNextMarksAllInvalidSetupFieldsAndTracksFirstFocusTarget()
+    {
+        RunOnAvaloniaThread(() =>
+        {
+            var window = CreateCallCreateWizardWindow();
+            var organisationBox = GetPrivateField<AutoCompleteBox>(window, "_organisationBox");
+            var recipientNameBox = GetPrivateField<TextBox>(window, "_recipientNameBox");
+            var timezoneBox = GetPrivateField<AutoCompleteBox>(window, "_timezoneBox");
+            var phoneNumberBox = GetPrivateField<TextBox>(window, "_phoneNumberBox");
+
+            InvokePrivateMethod(window, "MoveNext");
+
+            Assert.Contains("invalid", organisationBox.Classes);
+            Assert.Contains("invalid", recipientNameBox.Classes);
+            Assert.Contains("invalid", timezoneBox.Classes);
+            Assert.Contains("invalid", phoneNumberBox.Classes);
+            Assert.Equal("An organisation is required.", GetPrivateField<TextBlock>(window, "_errorText").Text);
+            Assert.Same(organisationBox, GetPrivateField<Control>(window, "_lastValidationFocusTarget"));
+        });
     }
 
     [Fact]
@@ -984,6 +1306,64 @@ public sealed class HalleyCliApplicationTests
         Assert.Equal(1, exitCode);
         Assert.Contains(expectedError, harness.StderrText);
         Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task CallsCreateRejectsInvalidPhoneNumber()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{}"""));
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "phone",
+            "--phone-number", "0400000000",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--instructions", "Please check in",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Invalid --phone-number value. Expected a valid international phone number such as `+61400000000`.", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task CallsCreateRejectsInvalidRecipientTimezone()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{}"""));
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Eastern Standard Time",
+            "--instructions", "Please check in",
+            "--token", "inline-token");
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("Invalid --recipient-timezone value. Expected a valid IANA timezone such as `Australia/Melbourne`.", harness.StderrText);
+        Assert.Empty(harness.Requests);
+    }
+
+    [Theory]
+    [InlineData("ValidateIanaTimezone", "Australia/Melbourne", null)]
+    [InlineData("ValidateIanaTimezone", "Eastern Standard Time", "Expected a valid IANA timezone such as `Australia/Melbourne`.")]
+    [InlineData("ValidateInternationalPhoneNumber", "+61400000000", null)]
+    [InlineData("ValidateInternationalPhoneNumber", "0400000000", "Expected a valid international phone number such as `+61400000000`.")]
+    public void SharedApiFieldValidatorEnforcesExpectedRules(string methodName, string input, string? expectedError)
+    {
+        var validatorType = typeof(HalleyCliApplication).Assembly.GetType("Halley.App.Main.ApiFieldValidator");
+        Assert.NotNull(validatorType);
+
+        var method = validatorType!.GetMethod(methodName, BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var error = (string?)method!.Invoke(null, [input]);
+        Assert.Equal(expectedError, error);
     }
 
     [Fact]
@@ -1347,6 +1727,145 @@ public sealed class HalleyCliApplicationTests
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
 
+    private static object CreateCallCreateWizardWindow()
+    {
+        EnsureHeadlessAvalonia();
+
+        var assembly = typeof(HalleyCliApplication).Assembly;
+        var windowType = assembly.GetType("Halley.App.Main.CallCreateWizardWindow");
+        Assert.NotNull(windowType);
+
+        var completionType = assembly.GetType("Halley.App.Main.DialogCompletion`1");
+        Assert.NotNull(completionType);
+        var typedCompletion = completionType!.MakeGenericType(typeof(InteractiveCallCreateResult));
+        var completion = Activator.CreateInstance(typedCompletion, nonPublic: true);
+        Assert.NotNull(completion);
+
+        var constructor = windowType!.GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+            binder: null,
+            [typeof(InteractiveCallCreateRequest), typedCompletion],
+            modifiers: null);
+        Assert.NotNull(constructor);
+
+        return constructor!.Invoke([CreateWizardRequest(), completion!]);
+    }
+
+    private static InteractiveCallCreateRequest CreateWizardRequest() =>
+        new(
+            [
+                new InteractiveSuggestion("Acme Care", "Hotline licensed"),
+                new InteractiveSuggestion("No License Org", "No Hotline license")
+            ],
+            [
+                new InteractiveSuggestion("Australia/Melbourne"),
+                new InteractiveSuggestion("Europe/London")
+            ],
+            (_, _) => Task.FromResult<IReadOnlyList<InteractiveSuggestion>>([]),
+            (_, _, _) => Task.FromResult<IReadOnlyList<InteractiveSuggestion>>([]));
+
+    private static void EnsureHeadlessAvalonia()
+    {
+        lock (HeadlessLock)
+        {
+            if (_headlessInitialized)
+            {
+                return;
+            }
+
+            _headlessInitializedEvent = new AutoResetEvent(false);
+            _headlessWorkAvailableEvent = new AutoResetEvent(false);
+            _headlessWorkCompletedEvent = new AutoResetEvent(false);
+
+            _headlessThread = new Thread(() =>
+            {
+                AppBuilder.Configure<HeadlessTestApplication>()
+                    .UseHeadless(new AvaloniaHeadlessPlatformOptions())
+                    .SetupWithoutStarting();
+                _headlessInitialized = true;
+                _headlessInitializedEvent!.Set();
+
+                while (true)
+                {
+                    _headlessWorkAvailableEvent!.WaitOne();
+
+                    var action = _pendingHeadlessAction;
+                    _pendingHeadlessAction = null;
+
+                    try
+                    {
+                        action?.Invoke();
+                        _pendingHeadlessException = null;
+                    }
+                    catch (Exception ex)
+                    {
+                        _pendingHeadlessException = ex;
+                    }
+                    finally
+                    {
+                        _headlessWorkCompletedEvent!.Set();
+                    }
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "AvaloniaHeadlessTestThread"
+            };
+            _headlessThread.Start();
+            _headlessInitializedEvent.WaitOne();
+        }
+    }
+
+    private static void RunOnAvaloniaThread(Action action)
+    {
+        EnsureHeadlessAvalonia();
+        _pendingHeadlessException = null;
+        _pendingHeadlessAction = action;
+        _headlessWorkAvailableEvent!.Set();
+        _headlessWorkCompletedEvent!.WaitOne();
+        if (_pendingHeadlessException is not null)
+        {
+            throw new TargetInvocationException(_pendingHeadlessException);
+        }
+    }
+
+    private static void SetWizardStep(object window, string stepName)
+    {
+        var stepField = window.GetType().GetField("_currentStep", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(stepField);
+        var stepType = stepField!.FieldType;
+        stepField.SetValue(window, Enum.Parse(stepType, stepName));
+    }
+
+    private static object InvokePrivateMethod(object target, string methodName, params object?[] args)
+    {
+        var method = target.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        return method!.Invoke(target, args)!;
+    }
+
+    private static object GetPrivateField(object target, string fieldName)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field!.GetValue(target)!;
+    }
+
+    private static T GetPrivateField<T>(object target, string fieldName)
+    {
+        var value = GetPrivateField(target, fieldName);
+        return Assert.IsAssignableFrom<T>(value);
+    }
+
+    private static TextBlock GetValidatedFieldErrorText(object validationState)
+    {
+        var property = validationState.GetType().GetProperty("ErrorText", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(property);
+        var value = property!.GetValue(validationState);
+        Assert.IsType<TextBlock>(value);
+        return (TextBlock)value;
+    }
+
     private static HttpResponseMessage CreateInteractiveCallResponse(string body)
     {
         var callRequest = JsonNode.Parse(body)!.AsObject()["call_request"]!.AsObject();
@@ -1470,7 +1989,9 @@ public sealed class HalleyCliApplicationTests
             Func<HttpRequestMessage, string?, HttpResponseMessage> responder,
             IInteractiveUi? interactiveUi = null,
             ITextFileEditor? textFileEditor = null,
-            IAsyncClock? clock = null)
+            IAsyncClock? clock = null,
+            string replayCommandName = "halley-cli",
+            bool isWindows = false)
         {
             _tempDirectory = Path.Combine(Path.GetTempPath(), "halley-cli-tests", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_tempDirectory);
@@ -1485,7 +2006,9 @@ public sealed class HalleyCliApplicationTests
                 _stderr,
                 interactiveUi ?? new StubInteractiveUi(isInteractive: false),
                 textFileEditor,
-                clock);
+                clock,
+                replayCommandNameProvider: () => replayCommandName,
+                isWindowsProvider: () => isWindows);
         }
 
         public HalleyCliApplication Application { get; }
@@ -1680,4 +2203,6 @@ public sealed class HalleyCliApplicationTests
     private sealed record PromptRequest(string Prompt, IReadOnlyList<InteractiveSuggestion> Suggestions, string? HelpText, bool IsMultiline);
 
     private sealed record RecordedRequest(HttpMethod Method, string Uri, AuthenticationHeaderValue? Authorization, string? Body);
+
+    private sealed class HeadlessTestApplication : Application;
 }

@@ -12,6 +12,7 @@ public sealed record InteractiveCallCreateRequest(
 
 public sealed record InteractiveCallCreateResult(
     bool Cancelled,
+    bool ShowCommand,
     string? OrganisationReference,
     string? CallMethod,
     string? PhoneNumber,
@@ -27,6 +28,7 @@ public sealed record InteractiveCallCreateResult(
     public static InteractiveCallCreateResult CancelledResult() =>
         new(
             true,
+            false,
             null,
             null,
             null,
@@ -38,6 +40,33 @@ public sealed record InteractiveCallCreateResult(
             null,
             [],
             []);
+
+    public static InteractiveCallCreateResult ShowCommandResult(
+        string? organisationReference,
+        string? callMethod,
+        string? phoneNumber,
+        string? recipientName,
+        string? recipientTimezone,
+        string? templateReference,
+        int? templateId,
+        string? instructions,
+        string? agenda,
+        IReadOnlyList<string> notes,
+        IReadOnlyList<InteractiveCallCreateQuestion> questions) =>
+        new(
+            false,
+            true,
+            organisationReference,
+            callMethod,
+            phoneNumber,
+            recipientName,
+            recipientTimezone,
+            templateReference,
+            templateId,
+            instructions,
+            agenda,
+            notes,
+            questions);
 }
 
 public interface IInteractiveUi
