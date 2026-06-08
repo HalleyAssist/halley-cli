@@ -2165,83 +2165,96 @@ public sealed class HalleyCliApplication
             return TemplateReferenceResolution.Error("A call template reference is required.");
         }
 
-        var result = await apiClient.ListCallTemplatesAsync(token, new ListCallTemplatesQuery
+        if (templateId is not null)
+        {
+            var specificVersionResult = await apiClient.GetCallTemplateAsync(token, templateId.Value.ToString(CultureInfo.InvariantCulture), cancellationToken);
+            if ((int)specificVersionResult.StatusCode == 404)
+            {
+                return TemplateReferenceResolution.Error($"Call template `{normalized}` does not have version id `{templateId.Value}`.");
+            }
+
+            if (!specificVersionResult.IsSuccessStatusCode)
+            {
+                return TemplateReferenceResolution.ApiError(specificVersionResult);
+            }
+
+            var specificTemplate = specificVersionResult.JsonBody?["call_template"] as JsonObject;
+            if (specificTemplate is null)
+            {
+                return TemplateReferenceResolution.Error($"Call template `{normalized}` returned an incomplete response.");
+            }
+
+            if (!TemplateReferenceMatches(specificTemplate, normalized))
+            {
+                return TemplateReferenceResolution.Error($"Call template `{normalized}` does not have version id `{templateId.Value}`.");
+            }
+
+            return CreateTemplateReferenceResolution(specificTemplate, normalized);
+        }
+
+        var activeTemplateResult = await apiClient.GetCallTemplateAsync(token, normalized, cancellationToken);
+        if (activeTemplateResult.IsSuccessStatusCode)
+        {
+            var activeTemplate = activeTemplateResult.JsonBody?["call_template"] as JsonObject;
+            if (activeTemplate is null)
+            {
+                return TemplateReferenceResolution.Error($"Call template `{normalized}` returned an incomplete response.");
+            }
+
+            return CreateTemplateReferenceResolution(activeTemplate, normalized);
+        }
+
+        if ((int)activeTemplateResult.StatusCode != 404)
+        {
+            return TemplateReferenceResolution.ApiError(activeTemplateResult);
+        }
+
+        var byNameResult = await apiClient.ListCallTemplatesAsync(token, new ListCallTemplatesQuery
         {
             ForOrganisationId = organisationId,
-            AllVersions = true,
-            Uuid = normalized,
-            Order = "id DESC",
+            Order = "name ASC",
             Size = 200
         }, cancellationToken);
 
-        if (!result.IsSuccessStatusCode)
+        if (!byNameResult.IsSuccessStatusCode)
         {
-            return TemplateReferenceResolution.ApiError(result);
+            return TemplateReferenceResolution.ApiError(byNameResult);
         }
 
-        var templates = (result.JsonBody?["call_templates"] as JsonArray)?
+        var nameMatches = (byNameResult.JsonBody?["call_templates"] as JsonArray)?
             .OfType<JsonObject>()
-            .ToArray()
-            ?? [];
+            .Where(template => string.Equals(template["name"]?.GetValue<string>(), normalized, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
 
-        if (templates.Length == 0)
-        {
-            result = await apiClient.ListCallTemplatesAsync(token, new ListCallTemplatesQuery
-            {
-                ForOrganisationId = organisationId,
-                AllVersions = true,
-                Order = "name ASC",
-                Size = 200
-            }, cancellationToken);
-
-            if (!result.IsSuccessStatusCode)
-            {
-                return TemplateReferenceResolution.ApiError(result);
-            }
-
-            templates = (result.JsonBody?["call_templates"] as JsonArray)?
-                .OfType<JsonObject>()
-                .Where(template => string.Equals(template["name"]?.GetValue<string>(), normalized, StringComparison.OrdinalIgnoreCase))
-                .ToArray()
-                ?? [];
-        }
-
-        if (templates.Length == 0)
+        if (nameMatches is null || nameMatches.Length == 0)
         {
             return TemplateReferenceResolution.Error($"Call template `{normalized}` was not found or is not available to organisation {organisationId}.");
         }
 
-        var groupedByUuid = templates
-            .GroupBy(template => template["uuid"]?.GetValue<string>(), StringComparer.OrdinalIgnoreCase)
-            .Where(group => !string.IsNullOrWhiteSpace(group.Key))
-            .ToArray();
-
-        if (groupedByUuid.Length > 1)
+        if (nameMatches.Length > 1)
         {
             return TemplateReferenceResolution.Error($"Call template reference `{normalized}` matched multiple template groups. Use the template uuid instead.");
         }
 
-        var matchingVersions = groupedByUuid[0]
-            .Select(template => new TemplateVersionInfo(
-                template["id"]?.GetValue<int>() ?? 0,
-                $"name {template["name"]?.GetValue<string>()}, version {template["version"]?.GetValue<int>() ?? 0}"))
-            .Where(version => version.Id > 0)
-            .OrderByDescending(version => version.Id)
-            .ToArray();
-
-        if (templateId is not null && matchingVersions.All(version => version.Id != templateId.Value))
+        var resolvedUuid = nameMatches[0]["uuid"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(resolvedUuid))
         {
-            return TemplateReferenceResolution.Error($"Call template `{normalized}` does not have version id `{templateId.Value}`.");
+            return TemplateReferenceResolution.Error($"Call template `{normalized}` returned an incomplete response.");
         }
 
-        var selectedTemplate = templateId is null
-            ? groupedByUuid[0].First()
-            : groupedByUuid[0].First(template => template["id"]?.GetValue<int>() == templateId.Value);
+        var byUuidResult = await apiClient.GetCallTemplateAsync(token, resolvedUuid, cancellationToken);
+        if (!byUuidResult.IsSuccessStatusCode)
+        {
+            return TemplateReferenceResolution.ApiError(byUuidResult);
+        }
 
-        return TemplateReferenceResolution.Success(new ValidatedTemplateReference(
-            groupedByUuid[0].Key!,
-            selectedTemplate["id"]?.GetValue<int>(),
-            selectedTemplate["name"]?.GetValue<string>()), matchingVersions);
+        var resolvedTemplate = byUuidResult.JsonBody?["call_template"] as JsonObject;
+        if (resolvedTemplate is null)
+        {
+            return TemplateReferenceResolution.Error($"Call template `{normalized}` returned an incomplete response.");
+        }
+
+        return CreateTemplateReferenceResolution(resolvedTemplate, normalized);
     }
 
     private static CallRequestCreateRequest BuildCallRequest(CallCreateInput input) =>
@@ -2272,6 +2285,37 @@ public sealed class HalleyCliApplication
                 }
             }
         };
+
+    private static TemplateReferenceResolution CreateTemplateReferenceResolution(JsonObject selectedTemplate, string reference)
+    {
+        var matchingVersions = (selectedTemplate["versions"] as JsonArray)?
+            .OfType<JsonObject>()
+            .Select(template => new TemplateVersionInfo(
+                template["id"]?.GetValue<int>() ?? 0,
+                $"version {template["version"]?.GetValue<int>() ?? 0}{(template["active"]?.GetValue<bool>() == true ? " (active)" : string.Empty)}"))
+            .Where(version => version.Id > 0)
+            .OrderByDescending(version => version.Id)
+            .ToArray()
+            ?? [];
+
+        var uuid = selectedTemplate["uuid"]?.GetValue<string>();
+        var id = selectedTemplate["id"]?.GetValue<int>();
+        var name = selectedTemplate["name"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(uuid) || id is null || string.IsNullOrWhiteSpace(name))
+        {
+            return TemplateReferenceResolution.Error($"Call template `{reference}` returned an incomplete response.");
+        }
+
+        return TemplateReferenceResolution.Success(new ValidatedTemplateReference(
+            uuid,
+            id,
+            name), matchingVersions);
+    }
+
+    private static bool TemplateReferenceMatches(JsonObject template, string reference) =>
+        string.Equals(template["uuid"]?.GetValue<string>(), reference, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(template["name"]?.GetValue<string>(), reference, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(template["id"]?.GetValue<int>().ToString(CultureInfo.InvariantCulture), reference, StringComparison.OrdinalIgnoreCase);
 
     private async Task WriteCallReplayHintAsync(
         ParseResult parseResult,

@@ -90,6 +90,9 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
             },
             cancellationToken);
 
+    public Task<ApiCallResult> GetCallTemplateAsync(string token, string templateReference, CancellationToken cancellationToken = default) =>
+        SendAsync(HttpMethod.Get, _options.ApiBaseUri, $"/v1/call_templates/{Uri.EscapeDataString(templateReference)}", token, null, null, cancellationToken);
+
     public Task<ApiCallResult> ListApiKeysAsync(string token, int? organisationId, CancellationToken cancellationToken = default) =>
         SendAsync(
             HttpMethod.Get,

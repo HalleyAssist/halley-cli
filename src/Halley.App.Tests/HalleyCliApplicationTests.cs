@@ -675,7 +675,7 @@ public sealed class HalleyCliApplicationTests
             return request.RequestUri!.AbsolutePath switch
             {
                 "/api/v1/organisations/50" => OrganisationResponse(),
-                "/api/v1/call_templates" => CallTemplatesResponse((7, "template-uuid", "Wellbeing Check", 3)),
+                "/api/v1/call_templates/7" => CallTemplateResponse(7, "template-uuid", "Wellbeing Check", 3),
                 "/api/v1/call_requests" => AssertTemplateAndManualCallRequest(body!),
                 _ => throw new InvalidOperationException(request.RequestUri!.ToString())
             };
@@ -701,6 +701,38 @@ public sealed class HalleyCliApplicationTests
         Assert.Equal(0, exitCode);
         Assert.Equal("request-1", JsonNode.Parse(harness.StdoutText)!["call_request"]?["uuid"]?.GetValue<string>());
         Assert.DoesNotContain("To make this call again execute:", harness.StderrText);
+    }
+
+    [Fact]
+    public async Task CallsCreateUsesActiveTemplateVersionWhenTemplateIdIsOmitted()
+    {
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/v1/organisations/50" => OrganisationResponse(),
+                "/api/v1/call_templates/template-uuid" => CallTemplateResponseWithVersions(
+                    7,
+                    (9, "template-uuid", "Wellbeing Check", 4),
+                    (7, "template-uuid", "Wellbeing Check", 3)),
+                "/api/v1/call_requests" => AssertActiveTemplateVersionCallRequest(body!),
+                _ => throw new InvalidOperationException(request.RequestUri!.ToString())
+            };
+        });
+
+        var exitCode = await harness.RunAsync(
+            "calls",
+            "create",
+            "--organisation-id", "50",
+            "--call-method", "web",
+            "--recipient-name", "Test User",
+            "--recipient-timezone", "Australia/Melbourne",
+            "--template-uuid", "template-uuid",
+            "--token", "inline-token",
+            "--output", "json");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("request-active-template", JsonNode.Parse(harness.StdoutText)!["call_request"]?["uuid"]?.GetValue<string>());
     }
 
     [Fact]
@@ -953,7 +985,7 @@ public sealed class HalleyCliApplicationTests
             return request.RequestUri!.AbsolutePath switch
             {
                 "/api/v1/organisations" => OrganisationsListResponse((50, "Acme Care", true)),
-                "/api/v1/call_templates" => CallTemplatesResponse((7, "template-uuid", "Wellbeing Check", 3)),
+                "/api/v1/call_templates/7" => CallTemplateResponse(7, "template-uuid", "Wellbeing Check", 3),
                 "/api/v1/call_requests" => AssertReplayHintCallRequest(body!),
                 _ => throw new InvalidOperationException(request.RequestUri!.ToString())
             };
@@ -1636,7 +1668,10 @@ public sealed class HalleyCliApplicationTests
             return request.RequestUri!.AbsolutePath switch
             {
                 "/api/v1/organisations/50" => OrganisationResponse(),
-                "/api/v1/call_templates" => CallTemplatesResponse((7, "template-uuid", "Wellbeing Check", 3)),
+                "/api/v1/call_templates/99" => new HttpResponseMessage(HttpStatusCode.NotFound)
+                {
+                    Content = new StringContent("""{"error":"missing"}""", Encoding.UTF8, "application/json")
+                },
                 _ => throw new InvalidOperationException(request.RequestUri!.ToString())
             };
         });
@@ -1909,6 +1944,15 @@ public sealed class HalleyCliApplicationTests
         return JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-by-name","status":"pending"}}""");
     }
 
+    private static HttpResponseMessage AssertActiveTemplateVersionCallRequest(string body)
+    {
+        var callRequest = JsonNode.Parse(body)!.AsObject()["call_request"]!.AsObject();
+        Assert.Equal(50, callRequest["organisation_id"]?.GetValue<int>());
+        Assert.Equal("template-uuid", callRequest["hotline_call_template_uuid"]?.GetValue<string>());
+        Assert.Equal(7, callRequest["hotline_call_template_id"]?.GetValue<int>());
+        return JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-active-template","status":"pending"}}""");
+    }
+
     private static HttpResponseMessage AssertWizardCallRequest(string body)
     {
         var callRequest = JsonNode.Parse(body)!.AsObject()["call_request"]!.AsObject();
@@ -1975,6 +2019,41 @@ public sealed class HalleyCliApplicationTests
                         ["version"] = template.Version
                     })
                     .ToArray())
+        }.ToJsonString());
+
+    private static HttpResponseMessage CallTemplateResponse(
+        int id,
+        string uuid,
+        string name,
+        int version) =>
+        CallTemplateResponseWithVersions(id, (id, uuid, name, version));
+
+    private static HttpResponseMessage CallTemplateResponseWithVersions(
+        int selectedVersionId,
+        params (int Id, string Uuid, string Name, int Version)[] templates) =>
+        JsonResponse(HttpStatusCode.OK, new JsonObject
+        {
+            ["call_template"] = templates
+                .Select(template => new JsonObject
+                {
+                    ["id"] = template.Id,
+                    ["uuid"] = template.Uuid,
+                    ["name"] = template.Name,
+                    ["version"] = template.Version,
+                    ["active"] = template.Id == selectedVersionId,
+                    ["versions"] = new JsonArray(
+                        templates
+                            .OrderByDescending(versionInfo => versionInfo.Version)
+                            .Select(versionInfo => (JsonNode)new JsonObject
+                            {
+                                ["id"] = versionInfo.Id,
+                                ["version"] = versionInfo.Version,
+                                ["active"] = versionInfo.Id == selectedVersionId,
+                                ["created_at"] = "2026-02-18T08:55:58.611Z"
+                            })
+                            .ToArray())
+                })
+                .First(template => template["id"]?.GetValue<int>() == selectedVersionId)
         }.ToJsonString());
 
     private sealed class TestHarness : IDisposable

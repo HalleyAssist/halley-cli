@@ -16,6 +16,8 @@ public interface IHalleyApiClient
 
     Task<ApiCallResult> ListCallTemplatesAsync(string token, ListCallTemplatesQuery query, CancellationToken cancellationToken = default);
 
+    Task<ApiCallResult> GetCallTemplateAsync(string token, string templateReference, CancellationToken cancellationToken = default);
+
     Task<ApiCallResult> ListApiKeysAsync(string token, int? organisationId, CancellationToken cancellationToken = default);
 
     Task<ApiCallResult> GetApiKeyAsync(string token, string id, CancellationToken cancellationToken = default);
