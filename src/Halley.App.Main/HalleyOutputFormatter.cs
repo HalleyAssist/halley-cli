@@ -1,3 +1,4 @@
+using System.Net;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -37,6 +38,14 @@ public sealed class HalleyOutputFormatter
         }
 
         var summary = ExtractErrorSummary(result.JsonBody);
+        if (result.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            var message = "Authentication failed. Run `login ...` again or pass a fresh `--token`.";
+            return string.IsNullOrWhiteSpace(summary)
+                ? $"{message}{Environment.NewLine}Request failed: {(int)result.StatusCode} {result.StatusCode}"
+                : $"{message}{Environment.NewLine}Request failed: {(int)result.StatusCode} {result.StatusCode}{Environment.NewLine}Error: {summary}";
+        }
+
         return string.IsNullOrWhiteSpace(summary)
             ? $"Request failed: {(int)result.StatusCode} {result.StatusCode}"
             : $"Request failed: {(int)result.StatusCode} {result.StatusCode}{Environment.NewLine}Error: {summary}";

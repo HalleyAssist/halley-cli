@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Globalization;
+using System.Text;
 using System.Text.Json.Nodes;
 using Halley.App.Api;
 using Serilog;
@@ -74,8 +75,8 @@ public sealed class HalleyCliApplication
     private readonly ISessionStore _sessionStore;
     private readonly TextWriter _stdout;
     private readonly TextWriter _stderr;
-    private readonly IPasswordPrompt _passwordPrompt;
-    private readonly IInteractivePrompter _interactivePrompter;
+    private readonly IInteractiveUi _interactiveUi;
+    private readonly ITextFileEditor _textFileEditor;
     private readonly IAsyncClock _clock;
     private readonly IHalleyLoggerFactory _loggerFactory;
     private readonly HalleyOutputFormatter _formatter = new();
@@ -91,8 +92,8 @@ public sealed class HalleyCliApplication
         ISessionStore sessionStore,
         TextWriter? stdout = null,
         TextWriter? stderr = null,
-        IPasswordPrompt? passwordPrompt = null,
-        IInteractivePrompter? interactivePrompter = null,
+        IInteractiveUi? interactiveUi = null,
+        ITextFileEditor? textFileEditor = null,
         IAsyncClock? clock = null,
         IHalleyLoggerFactory? loggerFactory = null)
     {
@@ -100,8 +101,8 @@ public sealed class HalleyCliApplication
         _sessionStore = sessionStore;
         _stdout = stdout ?? Console.Out;
         _stderr = stderr ?? Console.Error;
-        _passwordPrompt = passwordPrompt ?? new ConsolePasswordPrompt();
-        _interactivePrompter = interactivePrompter ?? new ConsoleInteractivePrompter();
+        _interactiveUi = interactiveUi ?? new HybridInteractiveUi(new ConsoloniaInteractiveUi(), new ConsoleInteractiveUi());
+        _textFileEditor = textFileEditor ?? new SystemTextFileEditor();
         _clock = clock ?? new SystemAsyncClock();
         _loggerFactory = loggerFactory ?? new SerilogLoggerFactory();
         _outputOption = CreateOutputOption();
@@ -200,6 +201,8 @@ public sealed class HalleyCliApplication
         var command = new Command("login", "Authenticate and store a session token.");
         command.Add(CreateUserLoginCommand());
         command.Add(CreateApiKeyLoginCommand());
+        command.Add(CreateLoginTokensCommand());
+        command.Add(CreateLoginEditCommand());
         return command;
     }
 
@@ -224,7 +227,7 @@ public sealed class HalleyCliApplication
             if (string.IsNullOrWhiteSpace(password))
             {
                 CurrentLogger.Debug("Prompting for a password for user {UserName}.", parseResult.GetRequiredValue(usernameOption));
-                password = await _passwordPrompt.ReadPasswordAsync(_stderr, cancellationToken);
+                password = await _interactiveUi.ReadPasswordAsync(_stderr, cancellationToken);
             }
 
             if (string.IsNullOrWhiteSpace(password))
@@ -261,6 +264,90 @@ public sealed class HalleyCliApplication
             var request = new ApiKeyLoginRequest(parseResult.GetRequiredValue(secretOption));
             var result = await apiClient.Value!.LoginApiKeyAsync(request, cancellationToken);
             return await HandleLoginResultAsync(result, "api-key", parseResult, outputMode, cancellationToken);
+        });
+
+        return command;
+    }
+
+    private Command CreateLoginTokensCommand()
+    {
+        var command = new Command("tokens", "List all locally saved session tokens.");
+        command.SetAction(async (parseResult, cancellationToken) =>
+        {
+            var outputMode = GetOutputMode(parseResult);
+
+            try
+            {
+                var sessions = await _sessionStore.LoadAllAsync(cancellationToken);
+                var tokenObjects = sessions
+                    .OrderBy(entry => entry.Key, StringComparer.Ordinal)
+                    .Select(entry =>
+                    {
+                        var expiresAtUtc = JwtTokenInspector.TryGetExpirationUtc(entry.Value.Token, out var exp) ? exp : null;
+                        return new JsonObject
+                        {
+                            ["endpoint"] = entry.Key,
+                            ["auth_type"] = entry.Value.AuthType,
+                            ["saved_at"] = entry.Value.SavedAt.ToString("o", CultureInfo.InvariantCulture),
+                            ["expires_at_utc"] = expiresAtUtc?.UtcDateTime.ToString("u", CultureInfo.InvariantCulture),
+                            ["expired"] = expiresAtUtc is not null && expiresAtUtc.Value <= _clock.UtcNow,
+                            ["token"] = entry.Value.Token
+                        };
+                    })
+                    .ToArray();
+
+                var jsonArray = new JsonArray(tokenObjects.Select(token => (JsonNode)token).ToArray());
+                var humanArray = new JsonArray(tokenObjects.Select(token => token.DeepClone()).ToArray());
+
+                return await WriteSuccessAsync(
+                    CommandOutput.Json(
+                        new JsonObject { ["tokens"] = jsonArray },
+                        humanArray),
+                    outputMode,
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                CurrentLogger.Error(ex, "Failed to read session tokens from {SessionPath}.", _sessionStore.SessionPath);
+                return await WriteCliErrorAsync($"Failed to read session tokens from {_sessionStore.SessionPath}: {ex.Message}", outputMode, cancellationToken);
+            }
+        });
+
+        return command;
+    }
+
+    private Command CreateLoginEditCommand()
+    {
+        var command = new Command("edit", "Open the local session file in the system text editor.");
+        command.SetAction(async (parseResult, cancellationToken) =>
+        {
+            var outputMode = GetOutputMode(parseResult);
+
+            try
+            {
+                await _sessionStore.EnsureExistsAsync(cancellationToken);
+                _textFileEditor.Open(_sessionStore.SessionPath);
+
+                return await WriteSuccessAsync(
+                    CommandOutput.Json(
+                        new JsonObject
+                        {
+                            ["opened"] = true,
+                            ["path"] = _sessionStore.SessionPath
+                        },
+                        new JsonObject
+                        {
+                            ["status"] = "Opened local auth file.",
+                            ["path"] = _sessionStore.SessionPath
+                        }),
+                    outputMode,
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                CurrentLogger.Error(ex, "Failed to open session file {SessionPath}.", _sessionStore.SessionPath);
+                return await WriteCliErrorAsync($"Failed to open session file {_sessionStore.SessionPath}: {ex.Message}", outputMode, cancellationToken);
+            }
         });
 
         return command;
@@ -315,7 +402,13 @@ public sealed class HalleyCliApplication
 
             if (!shouldWait && !shouldDelete)
             {
-                return await HandleApiResultAsync(createResult, outputMode, cancellationToken);
+                var createExitCode = await HandleApiResultAsync(createResult, outputMode, cancellationToken);
+                if (createExitCode == 0 && input.ShouldWriteReplayHint)
+                {
+                    await WriteCallReplayHintAsync(parseResult, input.Input!, cancellationToken);
+                }
+
+                return createExitCode;
             }
 
             if (!createResult.IsSuccessStatusCode)
@@ -376,6 +469,11 @@ public sealed class HalleyCliApplication
             }
 
             await WriteSuccessAsync(CommandOutput.Json(status.JsonPayload!, status.HumanPayload!), outputMode, cancellationToken);
+            if (input.ShouldWriteReplayHint)
+            {
+                await WriteCallReplayHintAsync(parseResult, input.Input!, cancellationToken);
+            }
+
             return exitCode;
         });
 
@@ -1229,16 +1327,19 @@ public sealed class HalleyCliApplication
         OutputMode outputMode,
         CancellationToken cancellationToken)
     {
+        var wasPromptedInteractively = !HasCallCreateInput(parseResult, options);
         CallCreateCandidateResolution candidate;
-        if (!HasCallCreateInput(parseResult, options))
+        if (wasPromptedInteractively)
         {
-            if (!_interactivePrompter.IsInteractive)
+            if (!_interactiveUi.IsInteractive)
             {
                 return CallCreateInputResolution.Error("`calls create` without create options requires an interactive terminal. Provide the call options explicitly when running non-interactively.");
             }
 
             CurrentLogger.Information("Prompting interactively for a call request.");
-            candidate = await PromptForCallCreateInputAsync(apiClient, token, cancellationToken);
+            candidate = _interactiveUi.SupportsCallCreateWizard
+                ? await PromptForCallCreateWizardAsync(apiClient, token, cancellationToken)
+                : await PromptForCallCreateInputAsync(apiClient, token, cancellationToken);
         }
         else
         {
@@ -1255,7 +1356,13 @@ public sealed class HalleyCliApplication
             return CallCreateInputResolution.Error(candidate.ErrorMessage);
         }
 
-        return await ValidateAndResolveCallCreateInputAsync(apiClient, token, candidate.Candidate!, cancellationToken);
+        var validatedInput = await ValidateAndResolveCallCreateInputAsync(apiClient, token, candidate.Candidate!, cancellationToken);
+        if (validatedInput.Input is null || validatedInput.ErrorMessage is not null || validatedInput.ErrorResult is not null)
+        {
+            return validatedInput;
+        }
+
+        return CallCreateInputResolution.Success(validatedInput.Input, wasPromptedInteractively);
     }
 
     private static bool HasCallCreateInput(ParseResult parseResult, CallCreateOptions options) =>
@@ -1374,7 +1481,12 @@ public sealed class HalleyCliApplication
         var useManual = mode is "manual" or "template+manual";
 
         var organisationSuggestions = await LoadOrganisationSuggestionsAsync(apiClient, token, cancellationToken);
-        var organisationReference = await PromptForOrganisationAsync(apiClient, token, organisationSuggestions, cancellationToken);
+        if (organisationSuggestions.ErrorResult is not null)
+        {
+            return CallCreateCandidateResolution.ApiError(organisationSuggestions.ErrorResult);
+        }
+
+        var organisationReference = await PromptForOrganisationAsync(apiClient, token, organisationSuggestions.Suggestions, cancellationToken);
         if (organisationReference.ErrorResult is not null)
         {
             return CallCreateCandidateResolution.ApiError(organisationReference.ErrorResult);
@@ -1427,10 +1539,15 @@ public sealed class HalleyCliApplication
             while (true)
             {
                 var templateSuggestions = await LoadTemplateSuggestionsAsync(apiClient, token, organisation.Id, cancellationToken);
+                if (templateSuggestions.ErrorResult is not null)
+                {
+                    return CallCreateCandidateResolution.ApiError(templateSuggestions.ErrorResult);
+                }
+
                 templateUuid = await PromptForRequiredLineAsync(
                     "Template (name or uuid): ",
                     cancellationToken,
-                    templateSuggestions,
+                    templateSuggestions.Suggestions,
                     "Press Tab to cycle through visible templates.");
                 if (templateUuid is null)
                 {
@@ -1470,7 +1587,7 @@ public sealed class HalleyCliApplication
         {
             while (true)
             {
-                var instructionsValue = await _interactivePrompter.ReadMultilineAsync(
+                var instructionsValue = await _interactiveUi.ReadMultilineAsync(
                     _stderr,
                     "Instructions",
                     InstructionsSuggestions,
@@ -1481,7 +1598,7 @@ public sealed class HalleyCliApplication
                     return CallCreateCandidateResolution.Error("Interactive call creation was cancelled.");
                 }
 
-                var agendaValue = await _interactivePrompter.ReadMultilineAsync(
+                var agendaValue = await _interactiveUi.ReadMultilineAsync(
                     _stderr,
                     "Agenda",
                     AgendaSuggestions,
@@ -1532,6 +1649,61 @@ public sealed class HalleyCliApplication
             agenda,
             notes,
             questions));
+    }
+
+    private async Task<CallCreateCandidateResolution> PromptForCallCreateWizardAsync(
+        IHalleyApiClient apiClient,
+        string token,
+        CancellationToken cancellationToken)
+    {
+        var organizations = await LoadOrganisationSuggestionsAsync(apiClient, token, cancellationToken);
+        if (organizations.ErrorResult is not null)
+        {
+            return CallCreateCandidateResolution.ApiError(organizations.ErrorResult);
+        }
+
+        var request = new InteractiveCallCreateRequest(
+            organizations.Suggestions,
+            GetTimezoneSuggestions(),
+            async (organisationReference, innerCancellationToken) =>
+            {
+                var resolution = await ResolveOrganisationReferenceAsync(apiClient, token, organisationReference, innerCancellationToken);
+                if (resolution.Organisation is null)
+                {
+                    return [];
+                }
+
+                return (await LoadTemplateSuggestionsAsync(apiClient, token, resolution.Organisation.Id, innerCancellationToken)).Suggestions;
+            },
+            async (organisationReference, templateReference, innerCancellationToken) =>
+            {
+                var resolution = await ResolveOrganisationReferenceAsync(apiClient, token, organisationReference, innerCancellationToken);
+                if (resolution.Organisation is null)
+                {
+                    return [];
+                }
+
+                return await LoadTemplateVersionSuggestionsAsync(apiClient, token, resolution.Organisation.Id, templateReference, innerCancellationToken);
+            });
+
+        var result = await _interactiveUi.RunCallCreateWizardAsync(request, cancellationToken);
+        if (result.Cancelled)
+        {
+            return CallCreateCandidateResolution.Error("Interactive call creation was cancelled.");
+        }
+
+        return CallCreateCandidateResolution.Success(new CallCreateCandidate(
+            result.OrganisationReference,
+            result.CallMethod,
+            result.PhoneNumber,
+            result.RecipientName,
+            result.RecipientTimezone,
+            result.TemplateReference,
+            result.TemplateId,
+            result.Instructions,
+            result.Agenda,
+            result.Notes,
+            result.Questions.Select(question => new CallQuestionInput(question.Id, question.Text, question.Format)).ToArray()));
     }
 
     private async Task<CallNotesResolution> PromptForNotesAsync(CancellationToken cancellationToken)
@@ -1778,7 +1950,7 @@ public sealed class HalleyCliApplication
         }
     }
 
-    private async Task<IReadOnlyList<InteractiveSuggestion>> LoadOrganisationSuggestionsAsync(
+    private async Task<InteractiveSuggestionsResolution> LoadOrganisationSuggestionsAsync(
         IHalleyApiClient apiClient,
         string token,
         CancellationToken cancellationToken)
@@ -1791,21 +1963,20 @@ public sealed class HalleyCliApplication
 
         if (!result.IsSuccessStatusCode)
         {
-            CurrentLogger.Warning("Unable to load organisation suggestions: {StatusCode}", (int)result.StatusCode);
-            return [];
+            return InteractiveSuggestionsResolution.ApiError(result);
         }
 
-        return (result.JsonBody?["organisations"] as JsonArray)?
+        return InteractiveSuggestionsResolution.Success((result.JsonBody?["organisations"] as JsonArray)?
             .OfType<JsonObject>()
             .Select(organisation => new InteractiveSuggestion(
                 organisation["name"]?.GetValue<string>() ?? string.Empty,
-                $"id {organisation["id"]?.GetValue<int>()}, {(organisation["active_license_hotline"]?.GetValue<bool>() == true ? "Hotline licensed" : "No Hotline license")}"))
+                organisation["active_license_hotline"]?.GetValue<bool>() == true ? "Hotline licensed" : "No Hotline license"))
             .Where(static suggestion => !string.IsNullOrWhiteSpace(suggestion.Value))
             .ToArray()
-            ?? [];
+            ?? []);
     }
 
-    private async Task<IReadOnlyList<InteractiveSuggestion>> LoadTemplateSuggestionsAsync(
+    private async Task<InteractiveSuggestionsResolution> LoadTemplateSuggestionsAsync(
         IHalleyApiClient apiClient,
         string token,
         int organisationId,
@@ -1820,18 +1991,17 @@ public sealed class HalleyCliApplication
 
         if (!result.IsSuccessStatusCode)
         {
-            CurrentLogger.Warning("Unable to load call template suggestions for organisation {OrganisationId}: {StatusCode}", organisationId, (int)result.StatusCode);
-            return [];
+            return InteractiveSuggestionsResolution.ApiError(result);
         }
 
-        return (result.JsonBody?["call_templates"] as JsonArray)?
+        return InteractiveSuggestionsResolution.Success((result.JsonBody?["call_templates"] as JsonArray)?
             .OfType<JsonObject>()
             .Select(template => new InteractiveSuggestion(
                 template["name"]?.GetValue<string>() ?? string.Empty,
                 $"{template["uuid"]?.GetValue<string>()} (id {template["id"]?.GetValue<int>()})"))
             .Where(static suggestion => !string.IsNullOrWhiteSpace(suggestion.Value))
             .ToArray()
-            ?? [];
+            ?? []);
     }
 
     private async Task<IReadOnlyList<InteractiveSuggestion>> LoadTemplateVersionSuggestionsAsync(
@@ -2064,6 +2234,128 @@ public sealed class HalleyCliApplication
                 }
             }
         };
+
+    private async Task WriteCallReplayHintAsync(
+        ParseResult parseResult,
+        CallCreateInput input,
+        CancellationToken cancellationToken)
+    {
+        var command = BuildCallReplayCommand(parseResult, input);
+        await _stderr.WriteLineAsync($"To make this call again execute: {command}".AsMemory(), cancellationToken);
+    }
+
+    private string BuildCallReplayCommand(ParseResult parseResult, CallCreateInput input)
+    {
+        var arguments = new List<string>
+        {
+            "halley-cli",
+            "calls",
+            "create",
+            "--organisation-id",
+            input.OrganisationId.ToString(CultureInfo.InvariantCulture),
+            "--call-method",
+            input.CallMethod,
+            "--recipient-name",
+            input.RecipientName,
+            "--recipient-timezone",
+            input.RecipientTimezone
+        };
+
+        if (!string.IsNullOrWhiteSpace(input.PhoneNumber))
+        {
+            arguments.Add("--phone-number");
+            arguments.Add(input.PhoneNumber);
+        }
+
+        if (!string.IsNullOrWhiteSpace(input.TemplateUuid))
+        {
+            arguments.Add("--template-uuid");
+            arguments.Add(input.TemplateUuid);
+        }
+
+        if (input.TemplateId is not null)
+        {
+            arguments.Add("--template-id");
+            arguments.Add(input.TemplateId.Value.ToString(CultureInfo.InvariantCulture));
+        }
+
+        if (!string.IsNullOrWhiteSpace(input.Instructions))
+        {
+            arguments.Add("--instructions");
+            arguments.Add(input.Instructions);
+        }
+
+        if (!string.IsNullOrWhiteSpace(input.Agenda))
+        {
+            arguments.Add("--agenda");
+            arguments.Add(input.Agenda);
+        }
+
+        foreach (var note in input.Notes)
+        {
+            arguments.Add("--note");
+            arguments.Add(note);
+        }
+
+        foreach (var question in input.Questions)
+        {
+            arguments.Add("--question");
+            arguments.Add($"{question.Id}:{question.Format}:{question.Text}");
+        }
+
+        var endpoint = parseResult.GetValue(_endpointOption);
+        if (WasOptionProvided(parseResult, _endpointOption)
+            && !string.Equals(
+                HalleyEndpointResolver.Resolve(endpoint).SessionKey,
+                new HalleyApiClientOptions().SessionKey,
+                StringComparison.Ordinal))
+        {
+            arguments.Add("--endpoint");
+            arguments.Add(endpoint!);
+        }
+
+        return string.Join(" ", arguments.Select(FormatShellArgument));
+    }
+
+    private static string FormatShellArgument(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return "''";
+        }
+
+        if (value.All(IsShellSafeCharacter))
+        {
+            return value;
+        }
+
+        return value.Any(static ch => ch is '\n' or '\r' or '\t')
+            ? "$'" + EscapeAnsiCString(value) + "'"
+            : "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
+    }
+
+    private static bool IsShellSafeCharacter(char ch) =>
+        char.IsAsciiLetterOrDigit(ch)
+        || ch is '-' or '_' or '.' or '/' or ':' or '+' or '=' or '@' or ',';
+
+    private static string EscapeAnsiCString(string value)
+    {
+        var builder = new StringBuilder();
+        foreach (var ch in value)
+        {
+            builder.Append(ch switch
+            {
+                '\\' => "\\\\",
+                '\'' => "\\'",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                _ => ch.ToString()
+            });
+        }
+
+        return builder.ToString();
+    }
 
     private CallWaitConfigurationResolution GetCallWaitConfiguration(ParseResult parseResult, CallExecutionOptions options)
     {
@@ -2325,7 +2617,7 @@ public sealed class HalleyCliApplication
     {
         while (true)
         {
-            var value = await _interactivePrompter.ReadLineAsync(_stderr, prompt, suggestions, helpText, cancellationToken);
+            var value = await _interactiveUi.ReadLineAsync(_stderr, prompt, suggestions, helpText, cancellationToken);
             if (value is null)
             {
                 return null;
@@ -2350,7 +2642,7 @@ public sealed class HalleyCliApplication
     {
         while (true)
         {
-            var value = await _interactivePrompter.ReadLineAsync(_stderr, prompt, suggestions, invalidMessage, cancellationToken);
+            var value = await _interactiveUi.ReadLineAsync(_stderr, prompt, suggestions, invalidMessage, cancellationToken);
             if (value is null)
             {
                 return null;
@@ -2374,7 +2666,7 @@ public sealed class HalleyCliApplication
     {
         while (true)
         {
-            var value = await _interactivePrompter.ReadLineAsync(_stderr, prompt, suggestions, helpText, cancellationToken);
+            var value = await _interactiveUi.ReadLineAsync(_stderr, prompt, suggestions, helpText, cancellationToken);
             if (value is null)
             {
                 return null;
@@ -2397,7 +2689,7 @@ public sealed class HalleyCliApplication
     {
         while (true)
         {
-            var value = await _interactivePrompter.ReadLineAsync(_stderr, prompt, suggestions, helpText, cancellationToken);
+            var value = await _interactiveUi.ReadLineAsync(_stderr, prompt, suggestions, helpText, cancellationToken);
             if (value is null)
             {
                 return CallPromptSentinel.CancelledInt;
@@ -2426,7 +2718,7 @@ public sealed class HalleyCliApplication
     {
         while (true)
         {
-            var value = await _interactivePrompter.ReadLineAsync(_stderr, prompt, suggestions ?? YesNoSuggestions, helpText ?? "Enter `yes` or `no`.", cancellationToken);
+            var value = await _interactiveUi.ReadLineAsync(_stderr, prompt, suggestions ?? YesNoSuggestions, helpText ?? "Enter `yes` or `no`.", cancellationToken);
             if (value is null)
             {
                 return null;
@@ -2596,7 +2888,7 @@ public sealed class HalleyCliApplication
         try
         {
             var sessionEndpointKey = ResolveSessionEndpointKey(parseResult);
-            await _sessionStore.SaveAsync(sessionEndpointKey, new SessionRecord(token, authType, DateTimeOffset.UtcNow), cancellationToken);
+            await _sessionStore.SaveAsync(sessionEndpointKey, new SessionRecord(token, authType, _clock.Now), cancellationToken);
             CurrentLogger.Information("Saved {AuthType} session token for {Endpoint} to {SessionPath}.", authType, sessionEndpointKey, _sessionStore.SessionPath);
         }
         catch (Exception ex)
@@ -2629,6 +2921,15 @@ public sealed class HalleyCliApplication
         if (!string.IsNullOrWhiteSpace(explicitToken))
         {
             CurrentLogger.Debug("Using the token supplied via --token.");
+            if (!await ValidateTokenForUseAsync(
+                    explicitToken,
+                    "The supplied JWT has expired. Run `login ...` again or pass a fresh `--token`.",
+                    outputMode,
+                    cancellationToken))
+            {
+                return null;
+            }
+
             return explicitToken;
         }
 
@@ -2638,6 +2939,15 @@ public sealed class HalleyCliApplication
             var session = await _sessionStore.LoadAsync(sessionEndpointKey, cancellationToken);
             if (!string.IsNullOrWhiteSpace(session?.Token))
             {
+                if (!await ValidateTokenForUseAsync(
+                        session.Token,
+                        $"The saved session token for `{sessionEndpointKey}` has expired. Run `login ...` again for that endpoint or pass a fresh `--token`.",
+                        outputMode,
+                        cancellationToken))
+                {
+                    return null;
+                }
+
                 CurrentLogger.Information("Loaded a saved session token for {Endpoint} from {SessionPath}.", sessionEndpointKey, _sessionStore.SessionPath);
                 return session.Token;
             }
@@ -2652,6 +2962,27 @@ public sealed class HalleyCliApplication
             await WriteCliErrorAsync($"Failed to read session from {_sessionStore.SessionPath}: {ex.Message}", outputMode, cancellationToken);
             return null;
         }
+    }
+
+    private async Task<bool> ValidateTokenForUseAsync(
+        string token,
+        string expiredMessage,
+        OutputMode outputMode,
+        CancellationToken cancellationToken)
+    {
+        if (!JwtTokenInspector.TryGetExpirationUtc(token, out var expiresAtUtc) || expiresAtUtc is null)
+        {
+            return true;
+        }
+
+        if (expiresAtUtc.Value > _clock.UtcNow)
+        {
+            return true;
+        }
+
+        CurrentLogger.Warning("Rejected expired JWT that expired at {ExpiresAtUtc}.", expiresAtUtc.Value);
+        await WriteCliErrorAsync($"{expiredMessage} Expired at {expiresAtUtc.Value.UtcDateTime:u}.", outputMode, cancellationToken);
+        return false;
     }
 
     private ApiClientResolution GetApiClient(ParseResult parseResult)
@@ -2932,13 +3263,13 @@ public sealed class HalleyCliApplication
         public static CallCreateCandidateResolution ApiError(ApiCallResult errorResult) => new(null, null, errorResult);
     }
 
-    private sealed record CallCreateInputResolution(CallCreateInput? Input, string? ErrorMessage, ApiCallResult? ErrorResult)
+    private sealed record CallCreateInputResolution(CallCreateInput? Input, string? ErrorMessage, ApiCallResult? ErrorResult, bool ShouldWriteReplayHint)
     {
-        public static CallCreateInputResolution Success(CallCreateInput input) => new(input, null, null);
+        public static CallCreateInputResolution Success(CallCreateInput input, bool shouldWriteReplayHint = false) => new(input, null, null, shouldWriteReplayHint);
 
-        public static CallCreateInputResolution Error(string errorMessage) => new(null, errorMessage, null);
+        public static CallCreateInputResolution Error(string errorMessage) => new(null, errorMessage, null, false);
 
-        public static CallCreateInputResolution ApiError(ApiCallResult errorResult) => new(null, null, errorResult);
+        public static CallCreateInputResolution ApiError(ApiCallResult errorResult) => new(null, null, errorResult, false);
     }
 
     private sealed record CallNotesResolution(IReadOnlyList<string> Notes, string? ErrorMessage)
@@ -2962,6 +3293,13 @@ public sealed class HalleyCliApplication
         public static CallWaitConfigurationResolution Success(CallWaitConfiguration value) => new(value, null);
 
         public static CallWaitConfigurationResolution Error(string errorMessage) => new(null, errorMessage);
+    }
+
+    private sealed record InteractiveSuggestionsResolution(IReadOnlyList<InteractiveSuggestion> Suggestions, ApiCallResult? ErrorResult)
+    {
+        public static InteractiveSuggestionsResolution Success(IReadOnlyList<InteractiveSuggestion> suggestions) => new(suggestions, null);
+
+        public static InteractiveSuggestionsResolution ApiError(ApiCallResult result) => new([], result);
     }
 
     private sealed record ResolvedOrganisation(string Reference, int Id, string Name, bool ActiveLicenseHotline);

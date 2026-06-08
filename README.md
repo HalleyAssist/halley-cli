@@ -17,6 +17,10 @@ Sessions are stored per normalized endpoint, so each Halley environment keeps it
 
 All authenticated commands reuse the token for the current `--endpoint` automatically unless `--token <jwt>` is supplied explicitly.
 
+`login tokens` lists every locally saved token entry across endpoints.
+
+`login edit` creates the session file if needed and opens it in the local system text editor.
+
 ## Output Modes
 
 All commands support `--output human|json`.
@@ -37,9 +41,13 @@ All commands also support `--log [level]`. Logs are written to stderr so stdout 
 
 `login user` accepts `--password`, but if it is omitted the CLI prompts for the password interactively.
 
-`calls create` also supports interactive prompting. When it is invoked without any call-creation options, the CLI asks the required questions on stderr and builds the request from your answers.
+`calls create` also supports interactive prompting. When it is invoked without any call-creation options, the CLI now opens a Consolonia-powered step-by-step terminal UI wizard by default and builds the request from your answers.
 
-In interactive terminals, the call prompts print suggestions and support Tab-cycling autocomplete for single-line fields such as organisation, call method, timezone, template, and question format.
+In the rich interactive dialogs, press `Ctrl+C` to cancel cleanly.
+
+The rich interactive flow covers the `calls create` wizard and password prompting. If the richer UI cannot be used, the CLI falls back to the plain console prompt flow.
+
+The plain console fallback still supports Tab-cycling autocomplete for single-line suggested values, with prefix matches preferred over broader contains matches.
 
 `calls create --wait` and `calls status --wait` poll the request and matching call results until a result exists or the optional `--timeout` expires.
 
@@ -53,6 +61,10 @@ Calls can only be created for organisations with an active Hotline license. The 
 dotnet run --project ./src/Halley.App.Cli -- version
 
 dotnet run --project ./src/Halley.App.Cli -- login user --username alice
+
+dotnet run --project ./src/Halley.App.Cli -- login tokens
+
+dotnet run --project ./src/Halley.App.Cli -- login edit
 
 dotnet run --project ./src/Halley.App.Cli -- users me --output json
 

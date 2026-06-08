@@ -2,9 +2,56 @@ using System.Text;
 
 namespace Halley.App.Main;
 
-public sealed class ConsoleInteractivePrompter : IInteractivePrompter
+public sealed class ConsoleInteractiveUi : IInteractiveUi
 {
     public bool IsInteractive => !Console.IsInputRedirected && !Console.IsErrorRedirected;
+
+    public bool SupportsCallCreateWizard => false;
+
+    public async Task<string?> ReadPasswordAsync(TextWriter output, CancellationToken cancellationToken = default)
+    {
+        await output.WriteAsync("Password: ".AsMemory(), cancellationToken);
+        await output.FlushAsync(cancellationToken);
+
+        if (Console.IsInputRedirected)
+        {
+            var redirectedPassword = await Console.In.ReadLineAsync(cancellationToken);
+            await output.WriteLineAsync(string.Empty.AsMemory(), cancellationToken);
+            await output.FlushAsync(cancellationToken);
+            return redirectedPassword;
+        }
+
+        var password = new StringBuilder();
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                break;
+            }
+
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (password.Length > 0)
+                {
+                    password.Length--;
+                }
+
+                continue;
+            }
+
+            if (!char.IsControl(key.KeyChar))
+            {
+                password.Append(key.KeyChar);
+            }
+        }
+
+        await output.WriteLineAsync(string.Empty.AsMemory(), cancellationToken);
+        await output.FlushAsync(cancellationToken);
+        return password.ToString();
+    }
 
     public async Task<string?> ReadLineAsync(
         TextWriter output,
@@ -55,6 +102,11 @@ public sealed class ConsoleInteractivePrompter : IInteractivePrompter
         }
     }
 
+    public Task<InteractiveCallCreateResult> RunCallCreateWizardAsync(
+        InteractiveCallCreateRequest request,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("The plain console UI does not support the structured call-create wizard.");
+
     private static async Task WritePromptHeaderAsync(
         TextWriter output,
         IReadOnlyList<InteractiveSuggestion>? suggestions,
@@ -92,7 +144,7 @@ public sealed class ConsoleInteractivePrompter : IInteractivePrompter
         CancellationToken cancellationToken)
     {
         var buffer = new StringBuilder();
-        var cycleMatches = Array.Empty<string>();
+        var cycleMatches = Array.Empty<InteractiveSuggestion>();
         var cyclePrefix = string.Empty;
         var cycleIndex = -1;
         var renderedLength = 0;
@@ -131,12 +183,7 @@ public sealed class ConsoleInteractivePrompter : IInteractivePrompter
                 if (!string.Equals(cyclePrefix, currentText, StringComparison.Ordinal))
                 {
                     cyclePrefix = currentText;
-                    cycleMatches = suggestions
-                        .Select(static suggestion => suggestion.Value)
-                        .Where(value => value.StartsWith(currentText, StringComparison.OrdinalIgnoreCase)
-                            || value.Contains(currentText, StringComparison.OrdinalIgnoreCase))
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToArray();
+                    cycleMatches = InteractiveSuggestionMatcher.GetMatches(currentText, suggestions).ToArray();
                     cycleIndex = -1;
                 }
 
@@ -147,7 +194,7 @@ public sealed class ConsoleInteractivePrompter : IInteractivePrompter
 
                 cycleIndex = (cycleIndex + 1) % cycleMatches.Length;
                 buffer.Clear();
-                buffer.Append(cycleMatches[cycleIndex]);
+                buffer.Append(cycleMatches[cycleIndex].Value);
                 renderedLength = await RewritePromptAsync(output, prompt, buffer.ToString(), renderedLength, cancellationToken);
                 continue;
             }
@@ -163,7 +210,10 @@ public sealed class ConsoleInteractivePrompter : IInteractivePrompter
         }
     }
 
-    private static void ResetAutocompleteState(ref string[] cycleMatches, ref string cyclePrefix, ref int cycleIndex)
+    private static void ResetAutocompleteState(
+        ref InteractiveSuggestion[] cycleMatches,
+        ref string cyclePrefix,
+        ref int cycleIndex)
     {
         cycleMatches = [];
         cyclePrefix = string.Empty;

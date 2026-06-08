@@ -8,7 +8,7 @@ public static class BuildInfo
 
     private static readonly string InformationalVersion =
         Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-        ?? "0.1.0-dev+local";
+        ?? "0.0.0-dev+local";
 
     private static readonly string[] Parts = InformationalVersion.Split('+', 2);
 
