@@ -5,3 +5,4 @@ artifacts/
 package/
 core
 core.*
+.vscode/gitcharm-changelists.json
