@@ -17,8 +17,10 @@ jobs:
         include:
           - rid: win-x64
             artifact_name: halley-cli-windows-amd64
+            executable_name: halley-cli.exe
           - rid: linux-x64
             artifact_name: halley-cli-linux-amd64
+            executable_name: halley-cli
 
     runs-on: ubuntu-latest
 
@@ -42,6 +44,8 @@ jobs:
               -r ${{ matrix.rid }} \
               --self-contained true \
               -p:PublishSingleFile=true \
+              -p:DebugSymbols=false \
+              -p:DebugType=None \
               -p:Version=0.0.0-dev.${{ github.run_number }} \
               -p:SourceRevisionId=${{ github.sha }} \
               -o artifacts/${{ matrix.rid }}
@@ -64,4 +68,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: artifacts/${{ matrix.rid }}/
+          path: artifacts/${{ matrix.rid }}/${{ matrix.executable_name }}

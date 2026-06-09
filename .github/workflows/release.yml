@@ -17,16 +17,22 @@ jobs:
         include:
           - rid: win-x64
             artifact_name: halley-cli-windows-amd64
+            executable_name: halley-cli.exe
           - rid: win-arm64
             artifact_name: halley-cli-windows-arm64
+            executable_name: halley-cli.exe
           - rid: linux-x64
             artifact_name: halley-cli-linux-amd64
+            executable_name: halley-cli
           - rid: linux-arm64
             artifact_name: halley-cli-linux-arm64
+            executable_name: halley-cli
           - rid: osx-x64
             artifact_name: halley-cli-macos-amd64
+            executable_name: halley-cli
           - rid: osx-arm64
             artifact_name: halley-cli-macos-arm64
+            executable_name: halley-cli
 
     runs-on: ubuntu-latest
 
@@ -59,6 +65,8 @@ jobs:
               -r ${{ matrix.rid }} \
               --self-contained true \
               -p:PublishSingleFile=true \
+              -p:DebugSymbols=false \
+              -p:DebugType=None \
               -p:Version=${VERSION} \
               -p:SourceRevisionId=${{ github.sha }} \
               -o artifacts/${{ matrix.rid }}
@@ -77,21 +85,20 @@ jobs:
             /cores/core
             /cores/core.*
 
-      - name: Archive artifact
+      - name: Prepare release asset
         shell: bash
         run: |
           mkdir -p package
-          cd artifacts/${{ matrix.rid }}
-          zip -r ../../package/${{ matrix.artifact_name }}.zip .
+          cp "artifacts/${{ matrix.rid }}/${{ matrix.executable_name }}" "package/${{ matrix.artifact_name }}${{ startsWith(matrix.rid, 'win-') && '.exe' || '' }}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: package/${{ matrix.artifact_name }}.zip
+          path: package/${{ matrix.artifact_name }}${{ startsWith(matrix.rid, 'win-') && '.exe' || '' }}
 
       - name: Upload release asset
         if: github.event_name == 'release'
         uses: HalleyAssist/action-gh-release@master
         with:
-          files: package/${{ matrix.artifact_name }}.zip
+          files: package/${{ matrix.artifact_name }}${{ startsWith(matrix.rid, 'win-') && '.exe' || '' }}
