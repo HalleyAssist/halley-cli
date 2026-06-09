@@ -115,13 +115,17 @@ internal static class ConsoloniaDialogRunner
 
         using var registration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
 
-        try
-        {
-            return completion.Task.GetAwaiter().GetResult();
-        }
         finally
         {
-            thread.Join();
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                thread.Join();
+            }
+            else
+            {
+                thread.Join(TimeSpan.FromSeconds(1));
+            }
+
             if (failure is not null)
             {
                 throw failure;

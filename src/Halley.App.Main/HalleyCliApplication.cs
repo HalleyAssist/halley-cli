@@ -1355,9 +1355,21 @@ public sealed class HalleyCliApplication
             }
 
             CurrentLogger.Information("Prompting interactively for a call request.");
-            candidate = _interactiveUi.SupportsCallCreateWizard
-                ? await PromptForCallCreateWizardAsync(apiClient, token, cancellationToken)
-                : await PromptForCallCreateInputAsync(apiClient, token, cancellationToken);
+            if (_interactiveUi.SupportsCallCreateWizard)
+            {
+                try
+                {
+                    candidate = await PromptForCallCreateWizardAsync(apiClient, token, cancellationToken);
+                }
+                catch
+                {
+                    candidate = await PromptForCallCreateInputAsync(apiClient, token, cancellationToken);
+                }
+            }
+            else
+            {
+                candidate = await PromptForCallCreateInputAsync(apiClient, token, cancellationToken);
+            }
         }
         else
         {
@@ -3020,19 +3032,22 @@ public sealed class HalleyCliApplication
             var numberPart = trimmed[..^1];
             if (double.TryParse(numberPart, NumberStyles.Float, CultureInfo.InvariantCulture, out var amount))
             {
-                parsed = suffix switch
+                if (suffix is 's' or 'm' or 'h')
                 {
-                    's' => TimeSpan.FromSeconds(amount),
-                    'm' => TimeSpan.FromMinutes(amount),
-                    'h' => TimeSpan.FromHours(amount),
-                    _ => TimeSpan.Zero
-                };
-
-                if (parsed != TimeSpan.Zero || amount == 0)
-                {
+                    parsed = suffix switch
+                    {
+                        's' => TimeSpan.FromSeconds(amount),
+                        'm' => TimeSpan.FromMinutes(amount),
+                        'h' => TimeSpan.FromHours(amount),
+                        _ => TimeSpan.Zero
+                    };
                     error = null;
-                    return suffix is 's' or 'm' or 'h';
+                    return true;
                 }
+
+                parsed = null;
+                error = "Expected values like `5s`, `1m`, `2h`, or `00:00:05`.";
+                return false;
             }
         }
 
