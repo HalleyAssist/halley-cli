@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 
 namespace Halley.App.Api;
 
-public sealed record SessionRecord(string Token, string AuthType, DateTimeOffset SavedAtUtc);
+public sealed record SessionRecord(string Token, string AuthType, DateTimeOffset SavedAt);
 
 public interface ISessionStore
 {
@@ -11,7 +11,11 @@ public interface ISessionStore
 
     Task<SessionRecord?> LoadAsync(string endpointKey, CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyDictionary<string, SessionRecord>> LoadAllAsync(CancellationToken cancellationToken = default);
+
     Task SaveAsync(string endpointKey, SessionRecord session, CancellationToken cancellationToken = default);
+
+    Task EnsureExistsAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class FileSessionStore(string? sessionPath = null) : ISessionStore
@@ -30,6 +34,12 @@ public sealed class FileSessionStore(string? sessionPath = null) : ISessionStore
         return document.Sessions.TryGetValue(endpointKey, out var session) ? session : null;
     }
 
+    public async Task<IReadOnlyDictionary<string, SessionRecord>> LoadAllAsync(CancellationToken cancellationToken = default)
+    {
+        var document = await LoadDocumentAsync(cancellationToken);
+        return new Dictionary<string, SessionRecord>(document.Sessions, StringComparer.Ordinal);
+    }
+
     public async Task SaveAsync(string endpointKey, SessionRecord session, CancellationToken cancellationToken = default)
     {
         var directory = Path.GetDirectoryName(SessionPath);
@@ -42,6 +52,23 @@ public sealed class FileSessionStore(string? sessionPath = null) : ISessionStore
         document.Sessions[endpointKey] = session;
 
         var json = JsonSerializer.Serialize(document, SerializerOptions);
+        await File.WriteAllTextAsync(SessionPath, json, cancellationToken);
+    }
+
+    public async Task EnsureExistsAsync(CancellationToken cancellationToken = default)
+    {
+        if (File.Exists(SessionPath))
+        {
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(SessionPath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var json = JsonSerializer.Serialize(new SessionStoreDocument(), SerializerOptions);
         await File.WriteAllTextAsync(SessionPath, json, cancellationToken);
     }
 

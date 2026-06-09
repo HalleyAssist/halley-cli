@@ -8,3 +8,9 @@
 - Preserve the dump path, the exact command that produced it, and the surrounding stderr/stdout in your notes or PR description.
 - Investigate the crash with the platform-native tools that are available, for example `file`, `gdb`, `lldb`, or `coredumpctl`, and summarize what you learned before moving on.
 - If a core dump appears in CI, upload or retain the generated dump files and fix the underlying crash instead of papering over it.
+
+
+## Development
+
+- DRY
+- Write comments where immediate rationale might not be obvious
