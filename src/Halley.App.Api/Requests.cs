@@ -4,6 +4,50 @@ public sealed record UserLoginRequest(string Username, string Password);
 
 public sealed record ApiKeyLoginRequest(string Secret);
 
+public sealed class CallRequestCreateRequest
+{
+    public required CallRequestWriteModel CallRequest { get; init; }
+}
+
+public sealed class CallRequestWriteModel
+{
+    public required int OrganisationId { get; init; }
+
+    public string? Instructions { get; init; }
+
+    public string? Agenda { get; init; }
+
+    public IReadOnlyList<CallRequestQuestionWriteModel>? ResultQuestions { get; init; }
+
+    public IReadOnlyList<string>? CallNotes { get; init; }
+
+    public string? HotlineCallTemplateUuid { get; init; }
+
+    public int? HotlineCallTemplateId { get; init; }
+
+    public required CallRequestDataWriteModel CallData { get; init; }
+}
+
+public sealed class CallRequestDataWriteModel
+{
+    public required string CallMethod { get; init; }
+
+    public string? PhoneNumber { get; init; }
+
+    public required string RecipientName { get; init; }
+
+    public required string RecipientTimezone { get; init; }
+}
+
+public sealed class CallRequestQuestionWriteModel
+{
+    public required int Id { get; init; }
+
+    public required string Text { get; init; }
+
+    public required string Format { get; init; }
+}
+
 public sealed class CreateApiKeyRequest
 {
     public required ApiKeyWriteModel ApiKey { get; init; }
@@ -99,6 +143,23 @@ public sealed class ListOrganisationsQuery
     public int? Size { get; init; }
 
     public string? Name { get; init; }
+}
+
+public sealed class ListCallTemplatesQuery
+{
+    public int? Offset { get; init; }
+
+    public string? Order { get; init; }
+
+    public int? Size { get; init; }
+
+    public int? OrganisationId { get; init; }
+
+    public int? ForOrganisationId { get; init; }
+
+    public bool? AllVersions { get; init; }
+
+    public string? Uuid { get; init; }
 }
 
 public sealed class ListUsersQuery

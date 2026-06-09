@@ -16,6 +16,8 @@ public sealed record CommandOutput
 
     public JsonNode? JsonPayload { get; init; }
 
+    public JsonNode? HumanPayload { get; init; }
+
     public string? Token { get; init; }
 
     public string? Version { get; init; }
@@ -24,7 +26,14 @@ public sealed record CommandOutput
 
     public static CommandOutput Empty() => new() { Kind = CommandOutputKind.Empty };
 
-    public static CommandOutput Json(JsonNode payload) => new() { Kind = CommandOutputKind.JsonPayload, JsonPayload = payload };
+    public static CommandOutput Json(JsonNode payload) => new() { Kind = CommandOutputKind.JsonPayload, JsonPayload = payload, HumanPayload = payload };
+
+    public static CommandOutput Json(JsonNode jsonPayload, JsonNode humanPayload) => new()
+    {
+        Kind = CommandOutputKind.JsonPayload,
+        JsonPayload = jsonPayload,
+        HumanPayload = humanPayload
+    };
 
     public static CommandOutput TokenValue(string token) => new() { Kind = CommandOutputKind.Token, Token = token };
 
