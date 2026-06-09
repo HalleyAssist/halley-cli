@@ -17,10 +17,10 @@ jobs:
         include:
           - rid: win-x64
             artifact_name: halley-cli-windows-amd64
-            executable_name: halley-cli.exe
+            executable_name: Halley.App.Cli.exe
           - rid: linux-x64
             artifact_name: halley-cli-linux-amd64
-            executable_name: halley-cli
+            executable_name: Halley.App.Cli
 
     runs-on: ubuntu-latest
 
