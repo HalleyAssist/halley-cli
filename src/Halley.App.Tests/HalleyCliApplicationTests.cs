@@ -599,6 +599,36 @@ public sealed class HalleyCliApplicationTests
         Assert.DoesNotContain("Delete an organisation.", harness.StdoutText);
     }
 
+    [Theory]
+    [InlineData("call", "Create and inspect call requests and results.")]
+    [InlineData("api-key", "Manage organisation API keys.")]
+    [InlineData("organisation", "Manage organisations.")]
+    [InlineData("user", "Manage users.")]
+    public async Task SingularTopLevelAliasesShowCanonicalHelp(string alias, string expectedDescription)
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
+
+        var exitCode = await harness.RunAsync(alias, "--help");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains(expectedDescription, harness.StdoutText);
+        Assert.Equal(string.Empty, harness.StderrText);
+    }
+
+    [Theory]
+    [InlineData("login", "token", "List all locally saved session tokens.")]
+    [InlineData("call", "result", "Show call results for a call request.")]
+    public async Task SingularNestedAliasesShowCanonicalHelp(string parentCommand, string alias, string expectedDescription)
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
+
+        var exitCode = await harness.RunAsync(parentCommand, alias, "--help");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains(expectedDescription, harness.StdoutText);
+        Assert.Equal(string.Empty, harness.StderrText);
+    }
+
     [Fact]
     public async Task ApiErrorsReturnNonZeroAndJsonPayloadInJsonMode()
     {

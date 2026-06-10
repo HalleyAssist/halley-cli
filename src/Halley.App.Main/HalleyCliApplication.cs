@@ -70,6 +70,15 @@ public sealed class HalleyCliApplication
         new("Was the resident okay?", "Example boolean question."),
         new("What follow-up is needed?", "Example text question.")
     ];
+    private static readonly IReadOnlyDictionary<string, string> OptionalSingularCommandAliases = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["api-keys"] = "api-key",
+        ["calls"] = "call",
+        ["organisations"] = "organisation",
+        ["results"] = "result",
+        ["tokens"] = "token",
+        ["users"] = "user"
+    };
 
     private readonly Func<HalleyApiClientOptions, ILogger, IHalleyApiClient> _apiClientFactory;
     private readonly ISessionStore _sessionStore;
@@ -277,7 +286,7 @@ public sealed class HalleyCliApplication
 
     private Command CreateLoginTokensCommand()
     {
-        var command = new Command("tokens", "List all locally saved session tokens.");
+        var command = CreateCommandWithOptionalSingularAlias("tokens", "List all locally saved session tokens.");
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var outputMode = GetOutputMode(parseResult);
@@ -361,7 +370,7 @@ public sealed class HalleyCliApplication
 
     private Command CreateCallsCommand()
     {
-        var command = new Command("calls", "Create and inspect call requests and results.");
+        var command = CreateCommandWithOptionalSingularAlias("calls", "Create and inspect call requests and results.");
         command.Add(CreateCallsCreateCommand());
         command.Add(CreateCallsStatusCommand());
         command.Add(CreateCallsResultsCommand());
@@ -578,7 +587,7 @@ public sealed class HalleyCliApplication
     {
         var callRequestUuidArgument = new Argument<string>("call-request-uuid") { Description = "The call request uuid." };
 
-        var command = new Command("results", "Show call results for a call request.");
+        var command = CreateCommandWithOptionalSingularAlias("results", "Show call results for a call request.");
         command.Add(callRequestUuidArgument);
         command.SetAction(async (parseResult, cancellationToken) =>
         {
@@ -684,7 +693,7 @@ public sealed class HalleyCliApplication
 
     private Command CreateApiKeysCommand()
     {
-        var command = new Command("api-keys", "Manage organisation API keys.");
+        var command = CreateCommandWithOptionalSingularAlias("api-keys", "Manage organisation API keys.");
         command.Add(CreateApiKeysListCommand());
         command.Add(CreateApiKeysGetCommand());
         command.Add(CreateApiKeysCreateCommand());
@@ -835,7 +844,7 @@ public sealed class HalleyCliApplication
 
     private Command CreateOrganisationsCommand()
     {
-        var command = new Command("organisations", "Manage organisations.");
+        var command = CreateCommandWithOptionalSingularAlias("organisations", "Manage organisations.");
         command.Add(CreateOrganisationsListCommand());
         command.Add(CreateOrganisationsGetCommand());
         command.Add(CreateOrganisationsCreateCommand());
@@ -974,7 +983,7 @@ public sealed class HalleyCliApplication
 
     private Command CreateUsersCommand()
     {
-        var command = new Command("users", "Manage users.");
+        var command = CreateCommandWithOptionalSingularAlias("users", "Manage users.");
         command.Add(CreateUsersListCommand());
         command.Add(CreateUsersMeCommand());
         command.Add(CreateUsersGetCommand());
@@ -3373,6 +3382,17 @@ public sealed class HalleyCliApplication
 
     private static Option<T> CreateOption<T>(string name, string description) =>
         new(name) { Description = description };
+
+    private static Command CreateCommandWithOptionalSingularAlias(string name, string description)
+    {
+        var command = new Command(name, description);
+        if (OptionalSingularCommandAliases.TryGetValue(name, out var alias))
+        {
+            command.Aliases.Add(alias);
+        }
+
+        return command;
+    }
 
     private static Option<T> CreateRequiredOption<T>(string name, string description) =>
         new(name) { Description = description, Required = true };
