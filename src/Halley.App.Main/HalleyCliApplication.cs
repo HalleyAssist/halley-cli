@@ -585,10 +585,18 @@ public sealed class HalleyCliApplication
 
     private Command CreateCallsResultsCommand()
     {
-        var callRequestUuidArgument = new Argument<string>("call-request-uuid") { Description = "The call request uuid." };
+        var uuidArgument = new Argument<string?>("uuid")
+        {
+            Arity = ArgumentArity.ZeroOrOne,
+            Description = "Optional call uuid to limit results."
+        };
+        var offsetOption = CreateOption<int?>("--offset", "Offset the first returned call result.");
+        var sizeOption = CreateOption<int?>("--size", "Maximum number of returned call results.");
 
-        var command = CreateCommandWithOptionalSingularAlias("results", "Show call results for a call request.");
-        command.Add(callRequestUuidArgument);
+        var command = CreateCommandWithOptionalSingularAlias("results", "Show call results, optionally limited to a call uuid.");
+        command.Add(uuidArgument);
+        command.Add(offsetOption);
+        command.Add(sizeOption);
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var outputMode = GetOutputMode(parseResult);
@@ -604,7 +612,14 @@ public sealed class HalleyCliApplication
                 return 1;
             }
 
-            var result = await apiClient.Value!.ListCallResultsForRequestAsync(token, parseResult.GetRequiredValue(callRequestUuidArgument), cancellationToken);
+            var uuid = parseResult.GetValue(uuidArgument);
+            var result = await apiClient.Value!.ListCallResultsAsync(token, new ListCallResultsQuery
+            {
+                Uuid = uuid,
+                Offset = parseResult.GetValue(offsetOption),
+                Order = "created_at DESC",
+                Size = parseResult.GetValue(sizeOption)
+            }, cancellationToken);
             if (!result.IsSuccessStatusCode)
             {
                 return await WriteApiErrorAsync(result, outputMode, cancellationToken);
@@ -2754,15 +2769,18 @@ public sealed class HalleyCliApplication
                 continue;
             }
 
-            rows.Add(new JsonObject
+            var row = new JsonObject
             {
-                ["uuid"] = resultObject["uuid"]?.DeepClone(),
-                ["created_at"] = resultObject["created_at"]?.DeepClone(),
-                ["answered_at"] = resultObject["answered_at"]?.DeepClone(),
-                ["status"] = resultObject["status"]?.DeepClone(),
-                ["result"] = resultObject["result"]?.DeepClone(),
-                ["result_type"] = resultObject["result_type"]?.DeepClone()
-            });
+                ["uuid"] = resultObject["uuid"]?.DeepClone()
+            };
+
+            row["created_at"] = resultObject["created_at"]?.DeepClone();
+            row["answered_at"] = resultObject["answered_at"]?.DeepClone();
+            row["status"] = resultObject["status"]?.DeepClone();
+            row["result"] = resultObject["result"]?.DeepClone();
+            row["result_type"] = resultObject["result_type"]?.DeepClone();
+
+            rows.Add(row);
         }
 
         return new JsonObject

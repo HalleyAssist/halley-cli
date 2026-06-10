@@ -54,7 +54,7 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
     public Task<ApiCallResult> GetCallRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default) =>
         SendAsync(HttpMethod.Get, _options.ApiBaseUri, $"/v1/call_requests/{Uri.EscapeDataString(callRequestUuid)}", token, null, null, cancellationToken);
 
-    public Task<ApiCallResult> ListCallResultsForRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default) =>
+    public Task<ApiCallResult> ListCallResultsAsync(string token, ListCallResultsQuery query, CancellationToken cancellationToken = default) =>
         SendAsync(
             HttpMethod.Get,
             _options.ApiBaseUri,
@@ -63,10 +63,19 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
             null,
             new Dictionary<string, string?>
             {
-                ["hotline_call_request_uuid"] = callRequestUuid,
-                ["order"] = "created_at DESC"
+                ["offset"] = query.Offset?.ToString(),
+                ["order"] = query.Order,
+                ["size"] = query.Size?.ToString(),
+                ["uuid"] = query.Uuid
             },
             cancellationToken);
+
+    public Task<ApiCallResult> ListCallResultsForRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default) =>
+        ListCallResultsAsync(token, new ListCallResultsQuery
+        {
+            Uuid = callRequestUuid,
+            Order = "created_at DESC"
+        }, cancellationToken);
 
     public Task<ApiCallResult> DeleteCallResultAsync(string token, string callResultUuid, CancellationToken cancellationToken = default) =>
         SendAsync(HttpMethod.Delete, _options.ApiBaseUri, $"/v1/call_results/{Uri.EscapeDataString(callResultUuid)}", token, null, null, cancellationToken);

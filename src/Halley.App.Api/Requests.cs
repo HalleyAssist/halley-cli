@@ -162,6 +162,17 @@ public sealed class ListCallTemplatesQuery
     public string? Uuid { get; init; }
 }
 
+public sealed class ListCallResultsQuery
+{
+    public int? Offset { get; init; }
+
+    public string? Order { get; init; }
+
+    public int? Size { get; init; }
+
+    public string? Uuid { get; init; }
+}
+
 public sealed class ListUsersQuery
 {
     public int? Offset { get; init; }

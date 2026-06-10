@@ -617,7 +617,7 @@ public sealed class HalleyCliApplicationTests
 
     [Theory]
     [InlineData("login", "token", "List all locally saved session tokens.")]
-    [InlineData("call", "result", "Show call results for a call request.")]
+    [InlineData("call", "result", "Show call results, optionally limited to a call uuid.")]
     public async Task SingularNestedAliasesShowCanonicalHelp(string parentCommand, string alias, string expectedDescription)
     {
         using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
@@ -626,6 +626,22 @@ public sealed class HalleyCliApplicationTests
 
         Assert.Equal(0, exitCode);
         Assert.Contains(expectedDescription, harness.StdoutText);
+        Assert.Equal(string.Empty, harness.StderrText);
+    }
+
+    [Fact]
+    public async Task CallsResultsHelpShowsOptionalUuidAndPagingOptions()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
+
+        var exitCode = await harness.RunAsync("calls", "results", "--help");
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("Usage:", harness.StdoutText);
+        Assert.Contains("calls results [<uuid>] [options]", harness.StdoutText);
+        Assert.Contains("Optional call uuid to limit results.", harness.StdoutText);
+        Assert.Contains("--offset <offset>", harness.StdoutText);
+        Assert.Contains("--size <size>", harness.StdoutText);
         Assert.Equal(string.Empty, harness.StderrText);
     }
 
@@ -828,7 +844,7 @@ public sealed class HalleyCliApplicationTests
                 "/api/v1/organisations" => OrganisationsListResponse((50, "Acme Care", true)),
                 "/api/v1/call_requests" => CreateInteractiveCallResponse(body!),
                 "/api/v1/call_requests/request-2" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-2","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"completed","call_data":{"call_method":"phone","phone_number":"+61400000000","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
-                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-2","hotline_call_request_uuid":"request-2","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"request-2","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
                 _ => throw new InvalidOperationException(request.RequestUri!.ToString())
             };
         }, interactiveUi: interactivePrompter, clock: clock);
@@ -1521,7 +1537,7 @@ public sealed class HalleyCliApplicationTests
             {
                 "/api/v1/call_requests/request-1" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-1","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"active","call_data":{"call_method":"phone","phone_number":"+61400000000","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
                 "/api/v1/call_results" when resultRequests++ == 0 => JsonResponse(HttpStatusCode.OK, """{"call_results":[]}"""),
-                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-1","hotline_call_request_uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
                 _ => throw new InvalidOperationException(request.RequestUri!.ToString())
             };
         }, clock: clock);
@@ -1578,21 +1594,43 @@ public sealed class HalleyCliApplicationTests
     }
 
     [Fact]
-    public async Task CallsResultsUsesFilteredEndpointAndRendersHumanTable()
+    public async Task CallsResultsWithoutUuidListsVisibleResultsAndRendersHumanTable()
     {
         using var harness = new TestHarness((_, _) =>
-            JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-2","hotline_call_request_uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:58:58.611Z","answered_at":"2026-02-18T08:58:59.611Z","status":"success","result":"answered"},{"uuid":"result-1","hotline_call_request_uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"failed","result":"busy"}]}"""));
+            JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"request-2","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:58:58.611Z","answered_at":"2026-02-18T08:58:59.611Z","status":"success","result":"answered"},{"uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"failed","result":"busy"}]}"""));
 
-        var exitCode = await harness.RunAsync("calls", "results", "request-1", "--token", "inline-token");
+        var exitCode = await harness.RunAsync("calls", "results", "--token", "inline-token");
 
         Assert.Equal(0, exitCode);
         Assert.Single(harness.Requests);
         Assert.Contains("/api/v1/call_results?", harness.Requests[0].Uri);
-        Assert.Contains("hotline_call_request_uuid=request-1", harness.Requests[0].Uri);
+        Assert.DoesNotContain("uuid=", harness.Requests[0].Uri);
         Assert.Contains("order=created_at DESC", harness.Requests[0].Uri);
+        Assert.Contains("request-2", harness.StdoutText);
+        Assert.Contains("request-1", harness.StdoutText);
+        Assert.DoesNotContain("hotline_call_request_uuid", harness.StdoutText);
+        Assert.DoesNotContain("\"call_results\"", harness.StdoutText);
+    }
+
+    [Fact]
+    public async Task CallsResultsUsesFilteredEndpointAndForwardsPagingOptions()
+    {
+        using var harness = new TestHarness((_, _) =>
+            JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:58:58.611Z","answered_at":"2026-02-18T08:58:59.611Z","status":"success","result":"answered"}]}"""));
+
+        var exitCode = await harness.RunAsync("calls", "results", "request-1", "--token", "inline-token", "--offset", "5", "--size", "25");
+
+        Assert.Equal(0, exitCode);
+        Assert.Single(harness.Requests);
+        Assert.Contains("/api/v1/call_results?", harness.Requests[0].Uri);
+        Assert.Contains("uuid=request-1", harness.Requests[0].Uri);
+        Assert.Contains("offset=5", harness.Requests[0].Uri);
+        Assert.Contains("order=created_at DESC", harness.Requests[0].Uri);
+        Assert.Contains("size=25", harness.Requests[0].Uri);
         Assert.Contains("uuid", harness.StdoutText);
-        Assert.Contains("result-2", harness.StdoutText);
+        Assert.Contains("request-1", harness.StdoutText);
         Assert.Contains("answered", harness.StdoutText);
+        Assert.DoesNotContain("hotline_call_request_uuid", harness.StdoutText);
         Assert.DoesNotContain("\"call_results\"", harness.StdoutText);
     }
 
@@ -1609,7 +1647,7 @@ public sealed class HalleyCliApplicationTests
                 "/api/v1/call_requests" => JsonResponse(HttpStatusCode.Created, """{"call_request":{"uuid":"request-3","status":"pending"}}"""),
                 "/api/v1/call_requests/request-3" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-3","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"active","call_data":{"call_method":"web","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
                 "/api/v1/call_results" when resultRequests++ == 0 => JsonResponse(HttpStatusCode.OK, """{"call_results":[]}"""),
-                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-3","hotline_call_request_uuid":"request-3","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"request-3","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
                 _ => throw new InvalidOperationException($"{request.RequestUri} {body}")
             };
         }, clock: clock);
@@ -1765,8 +1803,8 @@ public sealed class HalleyCliApplicationTests
             return request.RequestUri!.AbsolutePath switch
             {
                 "/api/v1/call_requests/request-1" => JsonResponse(HttpStatusCode.OK, """{"call_request":{"uuid":"request-1","organisation_id":50,"created_at":"2026-02-18T08:55:58.611Z","status":"completed","call_data":{"call_method":"web","recipient_name":"Test User","recipient_timezone":"Australia/Melbourne"}}}"""),
-                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"result-delete-1","hotline_call_request_uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
-                "/api/v1/call_results/result-delete-1" => JsonResponse(HttpStatusCode.NoContent, string.Empty),
+                "/api/v1/call_results" => JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:57:58.611Z","answered_at":"2026-02-18T08:57:59.611Z","status":"success","result":"answered"}]}"""),
+                "/api/v1/call_results/request-1" => JsonResponse(HttpStatusCode.NoContent, string.Empty),
                 _ => throw new InvalidOperationException(request.RequestUri!.ToString())
             };
         });
@@ -1780,10 +1818,10 @@ public sealed class HalleyCliApplicationTests
             "--output", "json");
 
         Assert.Equal(0, exitCode);
-        Assert.Contains(harness.Requests, request => request.Method == HttpMethod.Delete && request.Uri.EndsWith("/api/v1/call_results/result-delete-1", StringComparison.Ordinal));
+        Assert.Contains(harness.Requests, request => request.Method == HttpMethod.Delete && request.Uri.EndsWith("/api/v1/call_results/request-1", StringComparison.Ordinal));
         var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
         Assert.True(payload["deleted_call_result"]?.GetValue<bool>());
-        Assert.Equal("result-delete-1", payload["deleted_call_result_uuid"]?.GetValue<string>());
+        Assert.Equal("request-1", payload["deleted_call_result_uuid"]?.GetValue<string>());
     }
 
     private static HttpResponseMessage JsonResponse(HttpStatusCode statusCode, string json) =>
