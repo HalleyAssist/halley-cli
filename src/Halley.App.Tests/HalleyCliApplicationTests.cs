@@ -48,6 +48,34 @@ public sealed class HalleyCliApplicationTests
         Assert.NotNull(session);
         Assert.Equal("user-token", session!.Token);
         Assert.Equal("user", session.AuthType);
+        Assert.Null(session.LoginDetails);
+    }
+
+    [Fact]
+    public async Task LoginUserWithSaveStoresLoginDetails()
+    {
+        using var harness = new TestHarness((request, body) =>
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Equal("https://cloud.halleyassist.com/login", request.RequestUri?.ToString());
+
+            var payload = JsonNode.Parse(body!)!.AsObject();
+            Assert.Equal("alice", payload["username"]?.GetValue<string>());
+            Assert.Equal("secret", payload["password"]?.GetValue<string>());
+
+            return JsonResponse(HttpStatusCode.Created, """{"token":"user-token"}""");
+        });
+
+        var exitCode = await harness.RunAsync("login", "user", "--username", "alice", "--password", "secret", "--save");
+
+        Assert.Equal(0, exitCode);
+
+        var session = await harness.SessionStore.LoadAsync(DefaultSessionKey);
+        Assert.NotNull(session?.LoginDetails);
+        Assert.Equal("user", session!.LoginDetails!.Type);
+        Assert.Equal("alice", session.LoginDetails.Username);
+        Assert.Equal("secret", session.LoginDetails.Password);
+        Assert.Null(session.LoginDetails.Secret);
     }
 
     [Fact]
@@ -129,6 +157,59 @@ public sealed class HalleyCliApplicationTests
         Assert.NotNull(session);
         Assert.Equal("api-token", session!.Token);
         Assert.Equal("api-key", session.AuthType);
+        Assert.Null(session.LoginDetails);
+    }
+
+    [Fact]
+    public async Task LoginApiKeyWithSaveStoresLoginDetails()
+    {
+        using var harness = new TestHarness((request, body) =>
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Equal("https://cloud.halleyassist.com/auth/api_key", request.RequestUri?.ToString());
+
+            var payload = JsonNode.Parse(body!)!.AsObject();
+            Assert.Equal("very-secret", payload["secret"]?.GetValue<string>());
+
+            return JsonResponse(HttpStatusCode.Created, """{"token":"api-token"}""");
+        });
+
+        var exitCode = await harness.RunAsync("login", "api-key", "--secret", "very-secret", "--save");
+
+        Assert.Equal(0, exitCode);
+
+        var session = await harness.SessionStore.LoadAsync(DefaultSessionKey);
+        Assert.NotNull(session?.LoginDetails);
+        Assert.Equal("api-key", session!.LoginDetails!.Type);
+        Assert.Equal("very-secret", session.LoginDetails.Secret);
+        Assert.Null(session.LoginDetails.Username);
+        Assert.Null(session.LoginDetails.Password);
+    }
+
+    [Fact]
+    public async Task LoginWithoutSaveClearsPreviouslySavedLoginDetails()
+    {
+        using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.Created, """{"token":"new-token"}"""));
+
+        await harness.SessionStore.SaveAsync(
+            DefaultSessionKey,
+            new SessionRecord("old-token", "user", DateTimeOffset.UtcNow)
+            {
+                LoginDetails = new SavedLoginDetails("user")
+                {
+                    Username = "alice",
+                    Password = "old-secret"
+                }
+            });
+
+        var exitCode = await harness.RunAsync("login", "user", "--username", "alice", "--password", "new-secret");
+
+        Assert.Equal(0, exitCode);
+
+        var session = await harness.SessionStore.LoadAsync(DefaultSessionKey);
+        Assert.NotNull(session);
+        Assert.Equal("new-token", session!.Token);
+        Assert.Null(session.LoginDetails);
     }
 
     [Fact]
@@ -185,6 +266,90 @@ public sealed class HalleyCliApplicationTests
         Assert.Contains("Run `login ...` again", harness.StderrText);
         Assert.Contains("2026-02-18 08:50:58Z", harness.StderrText);
         Assert.Empty(harness.Requests);
+    }
+
+    [Fact]
+    public async Task UsersMeRefreshesNearExpirySavedUserSession()
+    {
+        var clock = new FakeAsyncClock();
+        var refreshedJwt = CreateJwt(clock.UtcNow.AddHours(1));
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/login" => AssertUserRefreshLogin(body!, refreshedJwt),
+                "/api/v1/users/_me" => AssertUsersMeUsesToken(request, refreshedJwt),
+                _ => JsonResponse(HttpStatusCode.NotFound, """{"error":"unexpected"}""")
+            };
+        }, clock: clock);
+
+        await harness.SessionStore.SaveAsync(
+            DefaultSessionKey,
+            new SessionRecord(CreateJwt(clock.UtcNow.AddMinutes(2)), "user", clock.UtcNow)
+            {
+                LoginDetails = new SavedLoginDetails("user")
+                {
+                    Username = "alice",
+                    Password = "secret"
+                }
+            });
+
+        var exitCode = await harness.RunAsync("users", "me");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(2, harness.Requests.Count);
+        Assert.Equal("https://cloud.halleyassist.com/login", harness.Requests[0].Uri);
+        Assert.Equal("https://cloud.halleyassist.com/api/v1/users/_me", harness.Requests[1].Uri);
+        Assert.DoesNotContain("saved session token", harness.StderrText);
+
+        var session = await harness.SessionStore.LoadAsync(DefaultSessionKey);
+        Assert.NotNull(session);
+        Assert.Equal(refreshedJwt, session!.Token);
+        Assert.Equal("user", session.AuthType);
+        Assert.NotNull(session.LoginDetails);
+        Assert.Equal("alice", session.LoginDetails!.Username);
+        Assert.Equal("secret", session.LoginDetails.Password);
+    }
+
+    [Fact]
+    public async Task UsersMeRefreshesExpiredSavedApiKeySession()
+    {
+        var clock = new FakeAsyncClock();
+        var refreshedJwt = CreateJwt(clock.UtcNow.AddHours(1));
+        using var harness = new TestHarness((request, body) =>
+        {
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/auth/api_key" => AssertApiKeyRefreshLogin(body!, refreshedJwt),
+                "/api/v1/users/_me" => AssertUsersMeUsesToken(request, refreshedJwt),
+                _ => JsonResponse(HttpStatusCode.NotFound, """{"error":"unexpected"}""")
+            };
+        }, clock: clock);
+
+        await harness.SessionStore.SaveAsync(
+            DefaultSessionKey,
+            new SessionRecord(CreateJwt(clock.UtcNow.AddMinutes(-5)), "api-key", clock.UtcNow)
+            {
+                LoginDetails = new SavedLoginDetails("api-key")
+                {
+                    Secret = "very-secret"
+                }
+            });
+
+        var exitCode = await harness.RunAsync("users", "me");
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(2, harness.Requests.Count);
+        Assert.Equal("https://cloud.halleyassist.com/auth/api_key", harness.Requests[0].Uri);
+        Assert.Equal("https://cloud.halleyassist.com/api/v1/users/_me", harness.Requests[1].Uri);
+        Assert.DoesNotContain("saved session token", harness.StderrText);
+
+        var session = await harness.SessionStore.LoadAsync(DefaultSessionKey);
+        Assert.NotNull(session);
+        Assert.Equal(refreshedJwt, session!.Token);
+        Assert.Equal("api-key", session.AuthType);
+        Assert.NotNull(session.LoginDetails);
+        Assert.Equal("very-secret", session.LoginDetails!.Secret);
     }
 
     [Fact]
@@ -1824,6 +1989,29 @@ public sealed class HalleyCliApplicationTests
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
+
+    private static HttpResponseMessage AssertUserRefreshLogin(string body, string token)
+    {
+        var payload = JsonNode.Parse(body)!.AsObject();
+        Assert.Equal("alice", payload["username"]?.GetValue<string>());
+        Assert.Equal("secret", payload["password"]?.GetValue<string>());
+
+        return JsonResponse(HttpStatusCode.Created, $$"""{"token":"{{token}}"}""");
+    }
+
+    private static HttpResponseMessage AssertApiKeyRefreshLogin(string body, string token)
+    {
+        var payload = JsonNode.Parse(body)!.AsObject();
+        Assert.Equal("very-secret", payload["secret"]?.GetValue<string>());
+
+        return JsonResponse(HttpStatusCode.Created, $$"""{"token":"{{token}}"}""");
+    }
+
+    private static HttpResponseMessage AssertUsersMeUsesToken(HttpRequestMessage request, string token)
+    {
+        Assert.Equal($"Bearer {token}", request.Headers.Authorization?.ToString());
+        return JsonResponse(HttpStatusCode.OK, """{"user":{"name":"alice"}}""");
+    }
 
     private static object CreateCallCreateWizardWindow()
     {

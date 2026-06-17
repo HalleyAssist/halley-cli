@@ -11,6 +11,9 @@ namespace Halley.App.Main;
 
 public sealed class HalleyCliApplication
 {
+    private const string UserAuthType = "user";
+    private const string ApiKeyAuthType = "api-key";
+    private static readonly TimeSpan TokenRefreshGrace = TimeSpan.FromMinutes(5);
     private static readonly Logger SilentLogger = new LoggerConfiguration().CreateLogger();
     private static readonly IReadOnlyList<InteractiveSuggestion> CallModeSuggestions =
     [
@@ -225,10 +228,12 @@ public sealed class HalleyCliApplication
     {
         var usernameOption = CreateRequiredOption<string>("--username", "The user name to authenticate.");
         var passwordOption = CreateOption<string?>("--password", "The password to authenticate. If omitted, the CLI prompts for it.");
+        var saveOption = CreateOption<bool>("--save", "Save login details so expired session tokens can be refreshed automatically.");
 
         var command = new Command("user", "Authenticate with a user name and password.");
         command.Add(usernameOption);
         command.Add(passwordOption);
+        command.Add(saveOption);
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var outputMode = GetOutputMode(parseResult);
@@ -253,9 +258,16 @@ public sealed class HalleyCliApplication
             var request = new UserLoginRequest(
                 parseResult.GetRequiredValue(usernameOption),
                 password);
+            var loginDetails = parseResult.GetValue(saveOption)
+                ? new SavedLoginDetails(UserAuthType)
+                {
+                    Username = request.Username,
+                    Password = request.Password
+                }
+                : null;
 
             var result = await apiClient.Value!.LoginUserAsync(request, cancellationToken);
-            return await HandleLoginResultAsync(result, "user", parseResult, outputMode, cancellationToken);
+            return await HandleLoginResultAsync(result, UserAuthType, loginDetails, parseResult, outputMode, cancellationToken);
         });
 
         return command;
@@ -264,9 +276,11 @@ public sealed class HalleyCliApplication
     private Command CreateApiKeyLoginCommand()
     {
         var secretOption = CreateRequiredOption<string>("--secret", "The API key secret to exchange for a JWT.");
+        var saveOption = CreateOption<bool>("--save", "Save login details so expired session tokens can be refreshed automatically.");
 
         var command = new Command("api-key", "Authenticate with an API key secret.");
         command.Add(secretOption);
+        command.Add(saveOption);
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var outputMode = GetOutputMode(parseResult);
@@ -277,8 +291,12 @@ public sealed class HalleyCliApplication
             }
 
             var request = new ApiKeyLoginRequest(parseResult.GetRequiredValue(secretOption));
+            var loginDetails = parseResult.GetValue(saveOption)
+                ? new SavedLoginDetails(ApiKeyAuthType) { Secret = request.Secret }
+                : null;
+
             var result = await apiClient.Value!.LoginApiKeyAsync(request, cancellationToken);
-            return await HandleLoginResultAsync(result, "api-key", parseResult, outputMode, cancellationToken);
+            return await HandleLoginResultAsync(result, ApiKeyAuthType, loginDetails, parseResult, outputMode, cancellationToken);
         });
 
         return command;
@@ -3096,32 +3114,65 @@ public sealed class HalleyCliApplication
     private static string? NormalizeOptionalText(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    private async Task<int> HandleLoginResultAsync(ApiCallResult result, string authType, ParseResult parseResult, OutputMode outputMode, CancellationToken cancellationToken)
+    private async Task<int> HandleLoginResultAsync(
+        ApiCallResult result,
+        string authType,
+        SavedLoginDetails? loginDetails,
+        ParseResult parseResult,
+        OutputMode outputMode,
+        CancellationToken cancellationToken)
+    {
+        var token = await ResolveLoginTokenAsync(result, outputMode, cancellationToken);
+        if (token is null)
+        {
+            return 1;
+        }
+
+        var sessionEndpointKey = ResolveSessionEndpointKey(parseResult);
+        if (!await TrySaveSessionAsync(
+                sessionEndpointKey,
+                new SessionRecord(token, authType, _clock.Now) { LoginDetails = loginDetails },
+                outputMode,
+                cancellationToken))
+        {
+            return 1;
+        }
+
+        return await WriteSuccessAsync(CommandOutput.TokenValue(token), outputMode, cancellationToken);
+    }
+
+    private async Task<string?> ResolveLoginTokenAsync(ApiCallResult result, OutputMode outputMode, CancellationToken cancellationToken)
     {
         if (!result.IsSuccessStatusCode)
         {
-            return await WriteApiErrorAsync(result, outputMode, cancellationToken);
+            await WriteApiErrorAsync(result, outputMode, cancellationToken);
+            return null;
         }
 
         var token = result.JsonBody?["token"]?.GetValue<string>();
         if (string.IsNullOrWhiteSpace(token))
         {
-            return await WriteCliErrorAsync("The login response did not contain a token.", outputMode, cancellationToken);
+            await WriteCliErrorAsync("The login response did not contain a token.", outputMode, cancellationToken);
+            return null;
         }
 
+        return token;
+    }
+
+    private async Task<bool> TrySaveSessionAsync(string sessionEndpointKey, SessionRecord session, OutputMode outputMode, CancellationToken cancellationToken)
+    {
         try
         {
-            var sessionEndpointKey = ResolveSessionEndpointKey(parseResult);
-            await _sessionStore.SaveAsync(sessionEndpointKey, new SessionRecord(token, authType, _clock.Now), cancellationToken);
-            CurrentLogger.Information("Saved {AuthType} session token for {Endpoint} to {SessionPath}.", authType, sessionEndpointKey, _sessionStore.SessionPath);
+            await _sessionStore.SaveAsync(sessionEndpointKey, session, cancellationToken);
+            CurrentLogger.Information("Saved {AuthType} session token for {Endpoint} to {SessionPath}.", session.AuthType, sessionEndpointKey, _sessionStore.SessionPath);
+            return true;
         }
         catch (Exception ex)
         {
             CurrentLogger.Error(ex, "Failed to save session to {SessionPath}.", _sessionStore.SessionPath);
-            return await WriteCliErrorAsync($"Failed to save session to {_sessionStore.SessionPath}: {ex.Message}", outputMode, cancellationToken);
+            await WriteCliErrorAsync($"Failed to save session to {_sessionStore.SessionPath}: {ex.Message}", outputMode, cancellationToken);
+            return false;
         }
-
-        return await WriteSuccessAsync(CommandOutput.TokenValue(token), outputMode, cancellationToken);
     }
 
     private async Task<int> HandleApiResultAsync(ApiCallResult result, OutputMode outputMode, CancellationToken cancellationToken)
@@ -3163,6 +3214,12 @@ public sealed class HalleyCliApplication
             var session = await _sessionStore.LoadAsync(sessionEndpointKey, cancellationToken);
             if (!string.IsNullOrWhiteSpace(session?.Token))
             {
+                if (session.LoginDetails is not null && ShouldRefreshSavedToken(session.Token))
+                {
+                    var refreshedToken = await RefreshSavedSessionAsync(sessionEndpointKey, session, parseResult, outputMode, cancellationToken);
+                    return refreshedToken;
+                }
+
                 if (!await ValidateTokenForUseAsync(
                         session.Token,
                         $"The saved session token for `{sessionEndpointKey}` has expired. Run `login ...` again for that endpoint or pass a fresh `--token`.",
@@ -3186,6 +3243,93 @@ public sealed class HalleyCliApplication
             await WriteCliErrorAsync($"Failed to read session from {_sessionStore.SessionPath}: {ex.Message}", outputMode, cancellationToken);
             return null;
         }
+    }
+
+    private bool ShouldRefreshSavedToken(string token)
+    {
+        if (!JwtTokenInspector.TryGetExpirationUtc(token, out var expiresAtUtc) || expiresAtUtc is null)
+        {
+            return false;
+        }
+
+        return expiresAtUtc.Value <= _clock.UtcNow.Add(TokenRefreshGrace);
+    }
+
+    private async Task<string?> RefreshSavedSessionAsync(
+        string sessionEndpointKey,
+        SessionRecord session,
+        ParseResult parseResult,
+        OutputMode outputMode,
+        CancellationToken cancellationToken)
+    {
+        var loginDetails = session.LoginDetails;
+        if (loginDetails is null)
+        {
+            return null;
+        }
+
+        var apiClient = GetApiClient(parseResult);
+        if (apiClient.IsError)
+        {
+            await WriteCliErrorAsync(apiClient.ErrorMessage!, outputMode, cancellationToken);
+            return null;
+        }
+
+        ApiCallResult result;
+        string authType;
+        switch (loginDetails.Type)
+        {
+            case UserAuthType:
+                if (string.IsNullOrWhiteSpace(loginDetails.Username) || string.IsNullOrWhiteSpace(loginDetails.Password))
+                {
+                    await WriteCliErrorAsync($"Saved user login details for `{sessionEndpointKey}` are incomplete. Run `login user ... --save` again for that endpoint or pass `--token`.", outputMode, cancellationToken);
+                    return null;
+                }
+
+                authType = UserAuthType;
+                CurrentLogger.Information("Refreshing saved user session token for {Endpoint}.", sessionEndpointKey);
+                result = await apiClient.Value!.LoginUserAsync(new UserLoginRequest(loginDetails.Username, loginDetails.Password), cancellationToken);
+                break;
+
+            case ApiKeyAuthType:
+                if (string.IsNullOrWhiteSpace(loginDetails.Secret))
+                {
+                    await WriteCliErrorAsync($"Saved API key login details for `{sessionEndpointKey}` are incomplete. Run `login api-key ... --save` again for that endpoint or pass `--token`.", outputMode, cancellationToken);
+                    return null;
+                }
+
+                authType = ApiKeyAuthType;
+                CurrentLogger.Information("Refreshing saved API key session token for {Endpoint}.", sessionEndpointKey);
+                result = await apiClient.Value!.LoginApiKeyAsync(new ApiKeyLoginRequest(loginDetails.Secret), cancellationToken);
+                break;
+
+            default:
+                await WriteCliErrorAsync($"Saved login details for `{sessionEndpointKey}` use unsupported auth type `{loginDetails.Type}`. Run `login ... --save` again for that endpoint or pass `--token`.", outputMode, cancellationToken);
+                return null;
+        }
+
+        var token = await ResolveLoginTokenAsync(result, outputMode, cancellationToken);
+        if (token is null)
+        {
+            return null;
+        }
+
+        if (!await ValidateTokenForUseAsync(
+                token,
+                $"The refreshed JWT for `{sessionEndpointKey}` has expired. Run `login ... --save` again for that endpoint or pass a fresh `--token`.",
+                outputMode,
+                cancellationToken))
+        {
+            return null;
+        }
+
+        return await TrySaveSessionAsync(
+            sessionEndpointKey,
+            new SessionRecord(token, authType, _clock.Now) { LoginDetails = loginDetails },
+            outputMode,
+            cancellationToken)
+            ? token
+            : null;
     }
 
     private async Task<bool> ValidateTokenForUseAsync(

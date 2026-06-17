@@ -13,9 +13,11 @@ The Halley Utility.
 
 Successful `login user` and `login api-key` commands save the returned JWT to `~/.halley/session.json`.
 
+Pass `--save` to also store the login details in the same file. This is plaintext opt-in credential storage: user logins save the username and password, and API-key logins save the API key secret.
+
 Sessions are stored per normalized endpoint, so each Halley environment keeps its own token entry.
 
-All authenticated commands reuse the token for the current `--endpoint` automatically unless `--token <jwt>` is supplied explicitly.
+All authenticated commands reuse the token for the current `--endpoint` automatically unless `--token <jwt>` is supplied explicitly. If a session was created with `--save`, the CLI re-runs that login flow when the saved JWT is expired or within five minutes of expiring, then stores and uses the refreshed token.
 
 `login tokens` lists every locally saved token entry across endpoints.
 
@@ -61,6 +63,8 @@ Calls can only be created for organisations with an active Hotline license. The 
 dotnet run --project ./src/Halley.App.Cli -- version
 
 dotnet run --project ./src/Halley.App.Cli -- login user --username alice
+
+dotnet run --project ./src/Halley.App.Cli -- login user --username alice --save
 
 dotnet run --project ./src/Halley.App.Cli -- login tokens
 

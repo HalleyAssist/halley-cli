@@ -1,9 +1,22 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace Halley.App.Api;
 
-public sealed record SessionRecord(string Token, string AuthType, DateTimeOffset SavedAt);
+public sealed record SessionRecord(string Token, string AuthType, DateTimeOffset SavedAt)
+{
+    public SavedLoginDetails? LoginDetails { get; init; }
+}
+
+public sealed record SavedLoginDetails(string Type)
+{
+    public string? Username { get; init; }
+
+    public string? Password { get; init; }
+
+    public string? Secret { get; init; }
+}
 
 public interface ISessionStore
 {
@@ -23,7 +36,8 @@ public sealed class FileSessionStore(string? sessionPath = null) : ISessionStore
     private static readonly string DefaultSessionKey = new HalleyApiClientOptions().SessionKey;
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
     {
-        WriteIndented = true
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
     public string SessionPath { get; } = sessionPath ?? ResolveDefaultSessionPath();
