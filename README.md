@@ -94,5 +94,7 @@ dotnet run --project ./src/Halley.App.Cli -- calls status request-uuid --delete
 
 dotnet run --project ./src/Halley.App.Cli -- calls status request-uuid --wait --timeout 2m --output json
 
-dotnet run --project ./src/Halley.App.Cli -- calls results request-uuid
+dotnet run --project ./src/Halley.App.Cli -- calls results
+
+dotnet run --project ./src/Halley.App.Cli -- calls results call-result-uuid
 ```

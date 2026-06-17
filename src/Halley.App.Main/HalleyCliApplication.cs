@@ -585,16 +585,16 @@ public sealed class HalleyCliApplication
 
     private Command CreateCallsResultsCommand()
     {
-        var uuidArgument = new Argument<string?>("uuid")
+        var callResultUuidArgument = new Argument<string?>("call-result-uuid")
         {
             Arity = ArgumentArity.ZeroOrOne,
-            Description = "Optional call uuid to limit results."
+            Description = "Optional call result uuid to fetch a single result."
         };
         var offsetOption = CreateOption<int?>("--offset", "Offset the first returned call result.");
         var sizeOption = CreateOption<int?>("--size", "Maximum number of returned call results.");
 
-        var command = CreateCommandWithOptionalSingularAlias("results", "Show call results, optionally limited to a call uuid.");
-        command.Add(uuidArgument);
+        var command = CreateCommandWithOptionalSingularAlias("results", "Show call results, or a single call result by uuid.");
+        command.Add(callResultUuidArgument);
         command.Add(offsetOption);
         command.Add(sizeOption);
         command.SetAction(async (parseResult, cancellationToken) =>
@@ -612,10 +612,15 @@ public sealed class HalleyCliApplication
                 return 1;
             }
 
-            var uuid = parseResult.GetValue(uuidArgument);
+            var callResultUuid = parseResult.GetValue(callResultUuidArgument);
+            if (!string.IsNullOrWhiteSpace(callResultUuid))
+            {
+                var singleResult = await apiClient.Value!.GetCallResultAsync(token, callResultUuid, cancellationToken);
+                return await HandleApiResultAsync(singleResult, outputMode, cancellationToken);
+            }
+
             var result = await apiClient.Value!.ListCallResultsAsync(token, new ListCallResultsQuery
             {
-                Uuid = uuid,
                 Offset = parseResult.GetValue(offsetOption),
                 Order = "created_at DESC",
                 Size = parseResult.GetValue(sizeOption)

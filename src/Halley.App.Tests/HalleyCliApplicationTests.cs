@@ -617,7 +617,7 @@ public sealed class HalleyCliApplicationTests
 
     [Theory]
     [InlineData("login", "token", "List all locally saved session tokens.")]
-    [InlineData("call", "result", "Show call results, optionally limited to a call uuid.")]
+    [InlineData("call", "result", "Show call results, or a single call result by uuid.")]
     public async Task SingularNestedAliasesShowCanonicalHelp(string parentCommand, string alias, string expectedDescription)
     {
         using var harness = new TestHarness((_, _) => JsonResponse(HttpStatusCode.OK, """{}"""));
@@ -638,8 +638,8 @@ public sealed class HalleyCliApplicationTests
 
         Assert.Equal(0, exitCode);
         Assert.Contains("Usage:", harness.StdoutText);
-        Assert.Contains("calls results [<uuid>] [options]", harness.StdoutText);
-        Assert.Contains("Optional call uuid to limit results.", harness.StdoutText);
+        Assert.Contains("calls results [<call-result-uuid>] [options]", harness.StdoutText);
+        Assert.Contains("Optional call result uuid to fetch a single result.", harness.StdoutText);
         Assert.Contains("--offset <offset>", harness.StdoutText);
         Assert.Contains("--size <size>", harness.StdoutText);
         Assert.Equal(string.Empty, harness.StderrText);
@@ -1613,25 +1613,20 @@ public sealed class HalleyCliApplicationTests
     }
 
     [Fact]
-    public async Task CallsResultsUsesFilteredEndpointAndForwardsPagingOptions()
+    public async Task CallsResultsWithUuidUsesSingularEndpointAndReturnsJsonObject()
     {
         using var harness = new TestHarness((_, _) =>
-            JsonResponse(HttpStatusCode.OK, """{"call_results":[{"uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:58:58.611Z","answered_at":"2026-02-18T08:58:59.611Z","status":"success","result":"answered"}]}"""));
+            JsonResponse(HttpStatusCode.OK, """{"call_result":{"uuid":"request-1","organisation_id":50,"result_type":"outbound","results":{},"created_at":"2026-02-18T08:58:58.611Z","answered_at":"2026-02-18T08:58:59.611Z","status":"success","result":"answered"}}"""));
 
-        var exitCode = await harness.RunAsync("calls", "results", "request-1", "--token", "inline-token", "--offset", "5", "--size", "25");
+        var exitCode = await harness.RunAsync("calls", "results", "request-1", "--token", "inline-token", "--output", "json");
 
         Assert.Equal(0, exitCode);
         Assert.Single(harness.Requests);
-        Assert.Contains("/api/v1/call_results?", harness.Requests[0].Uri);
-        Assert.Contains("uuid=request-1", harness.Requests[0].Uri);
-        Assert.Contains("offset=5", harness.Requests[0].Uri);
-        Assert.Contains("order=created_at DESC", harness.Requests[0].Uri);
-        Assert.Contains("size=25", harness.Requests[0].Uri);
-        Assert.Contains("uuid", harness.StdoutText);
-        Assert.Contains("request-1", harness.StdoutText);
-        Assert.Contains("answered", harness.StdoutText);
-        Assert.DoesNotContain("hotline_call_request_uuid", harness.StdoutText);
-        Assert.DoesNotContain("\"call_results\"", harness.StdoutText);
+        Assert.EndsWith("/api/v1/call_results/request-1", harness.Requests[0].Uri);
+        var payload = JsonNode.Parse(harness.StdoutText)!.AsObject();
+        Assert.Equal("request-1", payload["call_result"]?["uuid"]?.GetValue<string>());
+        Assert.Equal("answered", payload["call_result"]?["result"]?.GetValue<string>());
+        Assert.Null(payload["call_results"]);
     }
 
     [Fact]

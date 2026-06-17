@@ -10,6 +10,8 @@ public interface IHalleyApiClient
 
     Task<ApiCallResult> GetCallRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default);
 
+    Task<ApiCallResult> GetCallResultAsync(string token, string callResultUuid, CancellationToken cancellationToken = default);
+
     Task<ApiCallResult> ListCallResultsAsync(string token, ListCallResultsQuery query, CancellationToken cancellationToken = default);
 
     Task<ApiCallResult> ListCallResultsForRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default);

@@ -54,6 +54,9 @@ public sealed class HalleyApiClient(HttpClient httpClient, HalleyApiClientOption
     public Task<ApiCallResult> GetCallRequestAsync(string token, string callRequestUuid, CancellationToken cancellationToken = default) =>
         SendAsync(HttpMethod.Get, _options.ApiBaseUri, $"/v1/call_requests/{Uri.EscapeDataString(callRequestUuid)}", token, null, null, cancellationToken);
 
+    public Task<ApiCallResult> GetCallResultAsync(string token, string callResultUuid, CancellationToken cancellationToken = default) =>
+        SendAsync(HttpMethod.Get, _options.ApiBaseUri, $"/v1/call_results/{Uri.EscapeDataString(callResultUuid)}", token, null, null, cancellationToken);
+
     public Task<ApiCallResult> ListCallResultsAsync(string token, ListCallResultsQuery query, CancellationToken cancellationToken = default) =>
         SendAsync(
             HttpMethod.Get,
