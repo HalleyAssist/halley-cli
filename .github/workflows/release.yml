@@ -17,16 +17,28 @@ jobs:
         include:
           - rid: win-x64
             artifact_name: halley-cli-windows-amd64
+            executable_name: Halley.App.Cli.exe
+            asset_name: halley-cli-windows-amd64.exe
           - rid: win-arm64
             artifact_name: halley-cli-windows-arm64
+            executable_name: Halley.App.Cli.exe
+            asset_name: halley-cli-windows-arm64.exe
           - rid: linux-x64
             artifact_name: halley-cli-linux-amd64
+            executable_name: Halley.App.Cli
+            asset_name: halley-cli-linux-amd64
           - rid: linux-arm64
             artifact_name: halley-cli-linux-arm64
+            executable_name: Halley.App.Cli
+            asset_name: halley-cli-linux-arm64
           - rid: osx-x64
             artifact_name: halley-cli-macos-amd64
+            executable_name: Halley.App.Cli
+            asset_name: halley-cli-macos-amd64
           - rid: osx-arm64
             artifact_name: halley-cli-macos-arm64
+            executable_name: Halley.App.Cli
+            asset_name: halley-cli-macos-arm64
 
     runs-on: ubuntu-latest
 
@@ -77,21 +89,22 @@ jobs:
             /cores/core
             /cores/core.*
 
-      - name: Archive artifact
+      - name: Stage artifact binary
         shell: bash
         run: |
           mkdir -p package
-          cd artifacts/${{ matrix.rid }}
-          zip -r ../../package/${{ matrix.artifact_name }}.zip .
+          cp \
+            artifacts/${{ matrix.rid }}/${{ matrix.executable_name }} \
+            package/${{ matrix.asset_name }}
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: package/${{ matrix.artifact_name }}.zip
+          path: package/${{ matrix.asset_name }}
 
       - name: Upload release asset
         if: github.event_name == 'release'
         uses: HalleyAssist/action-gh-release@master
         with:
-          files: package/${{ matrix.artifact_name }}.zip
+          files: package/${{ matrix.asset_name }}
